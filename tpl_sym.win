@@ -1,0 +1,27 @@
+num_bands = 8
+num_wann  = 8
+
+begin unit_cell_cart
+Angstrom
+3.62759873 2.0943951 0.0
+-3.62759873  2.0943951 0.0
+0.0  0.0 30.0
+end unit_cell_cart
+
+begin atoms_cart
+Angstrom
+X  0.0  0.0  0.0
+end atoms_cart
+
+mp_grid = 6 6 1
+gamma_only = false
+
+site_symmetry = .true.
+symmetrize_eps=  1d-6
+num_iter  = 5000
+num_print_cycles = 1000
+write_u_matrices = true
+write_hr         = false
+shell_list = 2
+one_dim_axis = z
+skip_B1_tests = true
