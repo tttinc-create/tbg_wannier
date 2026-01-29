@@ -253,7 +253,12 @@ def t_cart(lat: MoireLattice, t_mn: Tuple[int, int]) -> npt.NDArray[np.float64]:
     m, n = t_mn
     return m * lat.a1 + n * lat.a2
 
+def s_cart(lat: MoireLattice, s_xy: Tuple[float, float]) -> npt.NDArray[np.float64]:
+    """Convert fractional coordinates s = x b1 + y b2 to cartesian."""
+    x, y = s_xy
+    return x * lat.b1 + y * lat.b2
 
+lst_s = [(0,0), (0,0), (0,0), (1/3, 2/3), (1/3, 2/3), (2/3, 1/3), (2/3, 1/3), (1/2, 0), (0, 1/2), (1/2, 1/2)]
 def roll_shift(lat: "MoireLattice", t_mn: Tuple[int, int]) -> Tuple[int, int]:
     """
     On your FFT real-space grid r = (i a1 + j a2)/N_L:
@@ -287,7 +292,6 @@ class DenseWannierCache:
     If use_trs=True, only eta=+1 is computed and eta=-1 is returned as conjugate.
     """
     lat: "MoireLattice"
-    use_trs: bool = True
     # key: (eta, layer, alpha, n_idx)
     W: Dict[Tuple[int, int, int, int], npt.NDArray[np.complex128]] = None  # type: ignore
 
@@ -302,7 +306,6 @@ class DenseWannierCache:
         alpha: Alpha,
         n_idx: int,
         w_coeffs_plus: npt.NDArray[np.complex128],
-        w_coeffs_minus: Optional[npt.NDArray[np.complex128]] = None,
     ) -> npt.NDArray[np.complex128]:
         """
         Return dense W^{(eta)}_{layer,alpha,n}(r).
@@ -313,30 +316,43 @@ class DenseWannierCache:
         if eta not in (+1, -1):
             raise ValueError("eta must be ±1")
 
-        if self.use_trs:
-            # store only eta=+1
-            keyp = (+1, int(layer), int(alpha), int(n_idx))
-            if keyp not in self.W:
-                Wp, _ = compute_real_space_wannier(
-                    self.lat, w_coeffs_plus, n_idx=n_idx, alpha_idx=int(alpha), layer=int(layer)
-                )
-                self.W[keyp] = Wp.astype(np.complex128, copy=False)
-            return self.W[keyp] if eta == +1 else np.conj(self.W[keyp])
+        # store only eta=+1
+        keyp = (+1, int(layer), int(alpha), int(n_idx))
+        if keyp not in self.W:
+            Wp, _ = compute_real_space_wannier(
+                self.lat, w_coeffs_plus, n_idx=n_idx, alpha_idx=int(alpha), layer=int(layer)
+            )
+            self.W[keyp] = Wp.astype(np.complex128, copy=False)
+        return self.W[keyp] if eta == +1 else np.conj(self.W[keyp])
 
-        # no TRS shortcut: cache each eta separately
-        if w_coeffs_minus is None:
-            raise ValueError("w_coeffs_minus must be provided when use_trs=False")
+    def precompute_all(
+        self,
+        w_coeffs_plus: npt.NDArray[np.complex128],
+        n_max: int = 10,
+        layers: Tuple[Layer, ...] = (+1, -1),
+        alphas: Tuple[Alpha, ...] = (1, 2),
+    ) -> None:
+        """Precompute and cache dense real-space Wannier arrays for all (layer,alpha,n).
 
-        key = (eta, int(layer), int(alpha), int(n_idx))
-        if key in self.W:
-            return self.W[key]
+        After this call, `self.W_all[(layer,alpha)]` will contain an array of shape
+        (n_max, G, G) with dtype complex128.
+        """
+        for layer in layers:
+            for alpha in alphas:
+                key = (int(layer), int(alpha))
+                if key in getattr(self, 'W_all', {}):
+                    continue
+                arrs = []
+                for n in range(n_max):
+                    Wp, _ = compute_real_space_wannier(
+                        self.lat, w_coeffs_plus, n_idx=n, alpha_idx=int(alpha), layer=int(layer)
+                    )
+                    arrs.append(Wp.astype(np.complex128, copy=False))
+                stacked = np.stack(arrs, axis=0)
+                if not hasattr(self, 'W_all'):
+                    self.W_all = {}
+                self.W_all[key] = stacked
 
-        coeffs = w_coeffs_plus if eta == +1 else w_coeffs_minus
-        Weta, _ = compute_real_space_wannier(
-            self.lat, coeffs, n_idx=n_idx, alpha_idx=int(alpha), layer=int(layer)
-        )
-        self.W[key] = Weta.astype(np.complex128, copy=False)
-        return self.W[key]
 
 
 class DensityDensityDense:
@@ -353,14 +369,14 @@ class DensityDensityDense:
     where ΔA = A_uc / N_L^2, and the FFT grid is G×G with G=N_L*N_k.
     """
 
-    def __init__(self, lat: MoireLattice, U_xi: float, xi: float, use_trs: bool = True):
+    def __init__(self, lat: MoireLattice, U_xi: float, xi: float):
         self.lat = lat
         self.U_xi = float(U_xi)
         self.xi = float(xi)
         self.G = lat.N_L * lat.N_k
         self.dA = A_UC / (lat.N_L * lat.N_L)
 
-        self.cache = DenseWannierCache(lat=lat, use_trs=use_trs)
+        self.cache = DenseWannierCache(lat=lat)
 
         self._Vq: Optional[npt.NDArray[np.float64]] = None
         self._qx: Optional[npt.NDArray[np.float64]] = None
@@ -394,7 +410,6 @@ class DensityDensityDense:
         eta_p: int,
         # Wannier coefficients for eta=+1 (and optionally eta=-1 if use_trs=False)
         w_coeffs_plus: npt.NDArray[np.complex128],
-        w_coeffs_minus: Optional[npt.NDArray[np.complex128]],
         n1: int, n2: int, n3: int, n4: int,
         t1_mn: Tuple[int, int],
         t2_mn: Tuple[int, int],
@@ -429,10 +444,10 @@ class DensityDensityDense:
             phB = np.exp(1j * float(eta_p) * float(dK @ t2c))
 
             for alpha in alphas:
-                W1 = self.cache.get(eta,   layer, alpha, n1, w_coeffs_plus, w_coeffs_minus)
-                W2 = self.cache.get(eta,   layer, alpha, n2, w_coeffs_plus, w_coeffs_minus)
-                W3 = self.cache.get(eta_p, layer, alpha, n3, w_coeffs_plus, w_coeffs_minus)
-                W4 = self.cache.get(eta_p, layer, alpha, n4, w_coeffs_plus, w_coeffs_minus)
+                W1 = self.cache.get(eta,   layer, alpha, n1, w_coeffs_plus)
+                W2 = self.cache.get(eta,   layer, alpha, n2, w_coeffs_plus)
+                W3 = self.cache.get(eta_p, layer, alpha, n3, w_coeffs_plus)
+                W4 = self.cache.get(eta_p, layer, alpha, n4, w_coeffs_plus)
 
                 # W(r - t) implemented by roll(+shift): new[i]=old[i-shift]
                 W1_shift = np.roll(W1, shift=sh_t1, axis=(0, 1))
@@ -448,3 +463,82 @@ class DensityDensityDense:
 
         # Outer integral: ∫ d^2r A(r) C(r)  ~  ΔA * Σ_r A*C
         return np.complex128(np.sum(A * C) * self.dA)
+
+    def matrix_elements_batch(
+        self,
+        eta: int,
+        eta_p: int,
+        w_coeffs_plus: npt.NDArray[np.complex128],
+        t1_mn: Tuple[int, int],
+        t2_mn: Tuple[int, int],
+        t3_mn: Tuple[int, int],
+        n_max: int = 10,
+        layers: Tuple[Layer, ...] = (+1, -1),
+        alphas: Tuple[Alpha, ...] = (1, 2),
+    ) -> npt.NDArray[np.complex128]:
+        """Compute all V_{n1 n2 n3 n4}(t1,t2,t3) at once.
+
+        Returns an array of shape (n_max, n_max, n_max, n_max) (complex128).
+        This method vectorizes over the band indices using numpy broadcasting and FFTs.
+        """
+        # ensure q-grid
+        self._ensure_q_grid_and_Vq()
+        assert self._Vq is not None and self._qx is not None and self._qy is not None
+
+        # Precompute all W arrays if not present
+        if not hasattr(self.cache, 'W_all'):
+            self.cache.precompute_all(w_coeffs_plus, n_max=n_max, layers=layers, alphas=alphas)
+
+        # shifts and cartesian translations
+        sh_t1 = roll_shift(self.lat, t1_mn)
+        sh_t2 = roll_shift(self.lat, t2_mn)
+        t1c = t_cart(self.lat, t1_mn)
+        t2c = t_cart(self.lat, t2_mn)
+        t3c = t_cart(self.lat, t3_mn)
+
+        G = self.G
+        N = n_max
+
+        # Accumulate A(n1,n2,r) and B(n3,n4,r) as arrays of shape (N,N,G,G)
+        A = np.zeros((N, N, G, G), dtype=np.complex128)
+        B = np.zeros((N, N, G, G), dtype=np.complex128)
+
+        for layer in layers:
+            dK = deltaK_of_layer(self.lat, layer)
+            phA = np.exp(1j * float(eta) * float(dK @ t1c))
+            phB = np.exp(1j * float(eta_p) * float(dK @ t2c))
+
+            for alpha in alphas:
+                W_all = self.cache.W_all[(int(layer), int(alpha))]  # shape (N,G,G)
+
+                # apply spatial rolls: W_shift[n] = W[n] rolled by sh
+                W1_shift = np.roll(W_all, shift=sh_t1, axis=(1, 2))
+                W3_shift = np.roll(W_all, shift=sh_t2, axis=(1, 2))
+
+                # compute outer products over band indices using broadcasting
+                # conj(W1_shift)[:,None,:,:] * W_all[None,:,:,:] -> (N,N,G,G)
+                A_term = phA * (np.conjugate(W1_shift)[:, None, :, :] * W_all[None, :, :, :])
+                B_term = phB * (np.conjugate(W3_shift)[:, None, :, :] * W_all[None, :, :, :])
+
+                A += A_term
+                B += B_term
+
+        # Convolution: for each (n3,n4) compute C = ifft2( fft2(B) * Vq * exp(i q·t3) )
+        phase_t3 = np.exp(1j * (self._qx * t3c[0] + self._qy * t3c[1]))
+
+        # FFT over last two axes
+        B_fft = np.fft.fft2(B, axes=(2, 3))
+        C_fft = B_fft * (self._Vq[None, None, :, :] * phase_t3[None, None, :, :])
+        C = np.fft.ifft2(C_fft, axes=(2, 3))
+
+        # Now compute V[n1,n2,n3,n4] = dA * sum_r A[n1,n2,r] * C[n3,n4,r]
+        # reshape to (N,N,G*G)
+        A_flat = A.reshape((N, N, G * G))
+        C_flat = C.reshape((N, N, G * G))
+
+        # tensordot over the spatial index to get shape (N,N,N,N)
+        V = np.tensordot(A_flat, C_flat, axes=([2], [2]))
+        V = V.astype(np.complex128, copy=False)
+        V *= self.dA
+
+        return V

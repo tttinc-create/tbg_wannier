@@ -103,8 +103,67 @@ class SolverParameters:
     # sort: Literal["abs", "energy"] = "abs"
     extra_eigs: int = 4
 
+
+# Mapping of EBR symbols to number of Wannier orbitals
+EBR_WANNIER_COUNTS = {
+    "A1a": 1,
+    "A2a": 1,
+    "Ea": 2,
+    "Ec": 4,
+    "Af": 3,
+    "Bf": 3,
+    "zhida": 2,  # special case: Zhida's 2 Wannier trial
+}
+
+
 @dataclass(frozen=True)
 class WannierizationRecipe:
+    """
+    Configuration for Wannierization trial orbitals.
+    
+    Parameters
+    ----------
+    l : float
+        Gaussian trial orbital width parameter.
+    alpha : float
+        Gaussian trial orbital exponent.
+    ebr_sequence : list[str]
+        Sequence of EBR symbols (e.g., ["Ea", "A1a", "A2a", "Ec"]).
+        Each symbol corresponds to an elementary band representation.
+        Allowed values and their Wannier counts:
+          - A1a: 1 Wannier orbital
+          - A2a: 1 Wannier orbital
+          - Ea: 2 Wannier orbitals
+          - Ec: 4 Wannier orbitals
+          - Af: 3 Wannier orbitals
+          - Bf: 3 Wannier orbitals
+          - zhida: 2 Wannier orbitals (special case)
+    """
     l: float = 0.5
     alpha: float = 2.0
     ebr_sequence: list[str] = field(default_factory=list)
+
+    @property
+    def num_wann(self) -> int:
+        """
+        Total number of Wannier functions from EBR sequence.
+        
+        Returns
+        -------
+        int
+            Sum of Wannier counts for all EBRs in ebr_sequence.
+        
+        Raises
+        ------
+        ValueError
+            If an EBR symbol is not recognized.
+        """
+        total = 0
+        for ebr in self.ebr_sequence:
+            if ebr not in EBR_WANNIER_COUNTS:
+                raise ValueError(
+                    f"Unknown EBR symbol: '{ebr}'. "
+                    f"Allowed values: {list(EBR_WANNIER_COUNTS.keys())}"
+                )
+            total += EBR_WANNIER_COUNTS[ebr]
+        return total

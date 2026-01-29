@@ -193,6 +193,34 @@ def default_eigensystem_cache_path(
     )
     return Path(cache_dir) / fname
 
+
+def module_name_from_model(
+    model: BMModel,
+) -> str:
+    """
+    Generate a clean module name for Wannier90 file organization.
+    
+    Extracts the model name and parameters into a descriptive directory name
+    for organizing Wannier90 files under ./wan90/MODULE_NAME/*.
+    
+    Returns
+    -------
+    str
+        Module name like: zhida_th1p05_wr0p8_w1110_NL20_Nk6
+    """
+    p = model.params
+    l = model.lat
+    prefix = p.name
+    module_name = (
+        f"{prefix}_"
+        f"th{_safe_float(p.theta_deg)}_"
+        f"wr{_safe_float(p.w_ratio)}_"
+        f"w1{_safe_float(p.w1_meV)}_"
+        f"NL{l.N_L}_"
+        f"Nk{l.N_k}"
+    )
+    return module_name
+
 def model_snapshot(model: BMModel) -> dict:
     """Return a JSON-serializable snapshot sufficient to reconstruct BMModel."""
     # BMModel has .params (BMParameters) and .lat (MoireLattice)

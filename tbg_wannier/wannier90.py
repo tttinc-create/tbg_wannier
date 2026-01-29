@@ -16,15 +16,264 @@ Implemented formats
 from __future__ import annotations
 from pathlib import Path
 import subprocess 
+import shutil
+import os
 from typing import List, Tuple, Optional
 from .lattice import MoireLattice
 from .bm import BMModel
 from .config import WannierizationRecipe
-from .solver import get_eigensystem_cached
+from .solver import get_eigensystem_cached, module_name_from_model
 from .trials import TrialBuilder
 from .symmetry import SymmetryGroup,build_D_band_from_group, build_D_wann_from_group, build_D_wann_generators_from_EBRs, build_dmn_maps_trivial_irr
 import numpy as np
 import re
+
+
+def ensure_wan90_workdir(
+    module_name: str,
+    wan90_root: str | Path = "wan90",
+    wannier90_x_path: Optional[str | Path] = None,
+) -> Path:
+    """
+    Ensure ./wan90/{module_name}/ directory exists and copy wannier90.x into it.
+    
+    Parameters
+    ----------
+    module_name : str
+        Directory name (e.g., 'zhida_th1p05_wr0p8_w1110_NL20_Nk6').
+    wan90_root : str or Path
+        Root directory for Wannier90 work (default: 'wan90').
+    wannier90_x_path : str, Path, or None
+        Path to wannier90.x executable. If None, searches in current dir.
+        
+    Returns
+    -------
+    Path
+        Full path to ./wan90/{module_name}/
+    """
+    wan90_root = Path(wan90_root)
+    work_dir = wan90_root / module_name
+    work_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Find and copy wannier90.x if not already present
+    wannier90_exe = work_dir / "wannier90.x"
+    if not wannier90_exe.exists():
+        # Search for wannier90.x
+        if wannier90_x_path is None:
+            search_paths = [
+                Path.cwd() / "wannier90.x",
+                Path.cwd().parent / "wannier90.x",
+                shutil.which("wannier90.x"),
+            ]
+            for candidate in search_paths:
+                if candidate and Path(candidate).exists():
+                    wannier90_x_path = candidate
+                    break
+        
+        if wannier90_x_path is None:
+            raise FileNotFoundError(
+                f"wannier90.x not found. Please provide wannier90_x_path or place "
+                f"wannier90.x in current directory."
+            )
+        
+        wannier90_x_path = Path(wannier90_x_path)
+        if not wannier90_x_path.exists():
+            raise FileNotFoundError(f"wannier90.x not found at: {wannier90_x_path}")
+        
+        shutil.copy2(wannier90_x_path, wannier90_exe)
+        print(f"Copied wannier90.x to {wannier90_exe}")
+    
+    return work_dir
+
+
+def generate_win_content(
+    *,
+    num_wann: int,
+    num_bands: int,
+    N_k: int,
+    mp_grid: Optional[Tuple[int, int, int]] = None,
+    units: str = "Ang",
+    write_hr: bool = False,
+    write_u_matrices: bool = True,
+    num_iter: int = 5000,
+    conv_tol: float = 1.0e-10,
+    disentangle: bool = True,
+    dis_win_max: float = 80.0,
+    dis_win_min: float = -80.0,
+    dis_froz_max: float = 0.01,
+    dis_froz_min: float = -0.01,
+    sym_adapted: bool = False,
+    site_symmetry: bool = True,
+    symmetrize_eps: float = 1e-6,
+    # shell_list: int = 2,
+    # one_dim_axis: str = "z",
+    # skip_b1_tests: bool = True,
+    extra_keywords: Optional[str] = None,
+) -> str:
+    """
+    Generate Wannier90 .win file content in Python.
+    
+    Parameters
+    ----------
+    num_wann : int
+        Number of Wannier functions.
+    num_bands : int
+        Number of Bloch bands.
+    N_k : int
+        k-point grid size (assumes N_k x N_k x 1).
+    mp_grid : tuple(int, int, int), optional
+        MP grid. If None, uses (N_k, N_k, 1).
+    projections : str
+        Projection specification (default: Gaussian s on origin + p orbitals).
+    units : str
+        Unit cell units (default: 'Ang').
+    write_hr : bool
+        Write real-space Hamiltonian (default: False).
+    write_u_matrices : bool
+        Write U matrices (default: True).
+    num_iter : int
+        Number of iterations (default: 10000).
+    conv_tol : float
+        Convergence tolerance (default: 1e-10).
+    disentangle : bool
+        Enable disentanglement (default: True).
+    dis_win_max, dis_win_min : float
+        Disentanglement window bounds (default: ±80 eV).
+    dis_froz_max, dis_froz_min : float
+        Frozen window bounds (default: ±0.01 eV).
+    sym_adapted : bool
+        Enable symmetry-adapted Wannierization (default: False).
+    site_symmetry : bool
+        Use site symmetry (for sym_adapted mode, default: True).
+    symmetrize_eps : float
+        Symmetry tolerance (default: 1e-6).
+    shell_list : int
+        Shell list size (for sym_adapted mode, default: 2).
+    one_dim_axis : str
+        One-dimensional axis (for sym_adapted mode, default: 'z').
+    skip_b1_tests : bool
+        Skip B1 tests (for sym_adapted mode, default: True).
+    extra_keywords : str, optional
+        Additional keywords to append (raw text).
+    
+    Returns
+    -------
+    str
+        Complete .win file content.
+    """
+    if mp_grid is None:
+        mp_grid = (N_k, N_k, 1)
+    
+    lines = [
+        "! Wannier90 input file generated by tbg_wannier",
+        "",
+        f"num_wann          = {num_wann:6d}",
+        f"num_bands         = {num_bands:6d}",
+        "",
+        "! Convergence & iteration",
+        f"num_iter          = {num_iter}",
+        "num_print_cycles  = 1000",
+        f"conv_tol          = {conv_tol:.1e}",
+        "conv_window       = 3",
+        "",
+        "! Real-space unit cell (minimal example, adjust for your system)",
+        "begin unit_cell_cart",
+        f"{units}",
+        "3.62759873 2.0943951 0.0",
+        "-3.62759873  2.0943951 0.0",
+        "0.0  0.0 30.0",
+        "end unit_cell_cart",
+        "",
+        "! Atoms (placeholder)",
+        "begin atoms_frac",
+        "X 0.00  0.00  0.00",
+        "end atoms_frac",
+        "",
+        "! File writing",
+        f"write_hr          = .{'true' if write_hr else 'false'}.",
+        f"write_u_matrices  = .{'true' if write_u_matrices else 'false'}.",
+        "",
+        f"mp_grid = {mp_grid[0]} {mp_grid[1]} {mp_grid[2]}",
+        "",
+    ]
+    
+    # Add disentanglement section if enabled
+    if disentangle:
+        lines.extend([
+            "! Disentanglement",
+            f"dis_win_max       = {dis_win_max:.1f}d0",
+            f"dis_win_min       = {dis_win_min:.1f}d0",
+            f"dis_froz_max      = {dis_froz_max:.2f}d0",
+            f"dis_froz_min      = {dis_froz_min:.2f}d0",
+            "dis_num_iter      = 1000",
+            "dis_mix_ratio     = 1.d0",
+            "dis_conv_tol      = 1.0e-10",
+            "",
+            "! Projections",
+            "begin projections",
+            "f=0.0,0.0,0.0:px;py",
+            "end projections",
+            "",
+        ])
+    
+    # Add symmetry-adapted section if enabled
+    if sym_adapted:
+        lines.extend([
+            "! Symmetry-adapted Wannierization",
+            f"site_symmetry     = .{'true' if site_symmetry else 'false'}.",
+            f"symmetrize_eps    = {symmetrize_eps:.0e}",
+            # f"shell_list        = {shell_list}",
+            # f"one_dim_axis      = {one_dim_axis}",
+            # f"skip_B1_tests     = .{'true' if skip_b1_tests else 'false'}.",
+            "",
+        ])
+    
+    if extra_keywords:
+        lines.append("")
+        lines.append(extra_keywords)
+    
+    return "\n".join(lines) + "\n"
+
+
+def write_win(
+    output_win: str | Path,
+    *,
+    num_wann: int,
+    num_bands: int,
+    N_k: int,
+    **kwargs,
+) -> None:
+    """
+    Write a Wannier90 .win file directly (no template needed).
+    
+    Parameters
+    ----------
+    output_win : str or Path
+        Output .win file path.
+    num_wann : int
+        Number of Wannier functions.
+    num_bands : int
+        Number of Bloch bands.
+    N_k : int
+        k-point grid size (assumes N_k x N_k x 1).
+    **kwargs
+        Additional arguments passed to generate_win_content().
+    
+    Returns
+    -------
+    None
+        Writes file to disk.
+    """
+    output_win = Path(output_win)
+    content = generate_win_content(
+        num_wann=num_wann,
+        num_bands=num_bands,
+        N_k=N_k,
+        **kwargs,
+    )
+    output_win.parent.mkdir(parents=True, exist_ok=True)
+    output_win.write_text(content)
+    print(f"Wrote {output_win}  (num_wann={num_wann}, num_bands={num_bands}, mp_grid={N_k} {N_k} 1)")
 
 
 def write_win_from_template(
@@ -79,7 +328,7 @@ def write_win_from_template(
     output_win.write_text(text)
     print(f"Wrote {output_win}  (num_wann={num_wann}, num_bands={num_bands}, mp_grid={N_k} {N_k} 1))")
     
-def read_eig(seedname: str) -> np.ndarray:
+def read_eig(seedname: str | Path) -> np.ndarray:
     """
     Read seedname.eig written by write_eig().
 
@@ -92,7 +341,8 @@ def read_eig(seedname: str) -> np.ndarray:
         eigvals[ik, m] = energy of band m at k-point ik
         (same shapes / ordering as passed to write_eig).
     """
-    filename = f"{seedname}.eig"
+    seedname = Path(seedname)
+    filename = seedname.parent / f"{seedname.stem}.eig"
     rows = []
     with open(filename, "r") as f:
         for line in f:
@@ -118,7 +368,7 @@ def read_eig(seedname: str) -> np.ndarray:
 
     return eigvals
 
-def write_eig(seedname: str, eig: np.ndarray) -> None:
+def write_eig(seedname: str | Path, eig: np.ndarray) -> None:
     """
     Write seedname.eig.
 
@@ -128,15 +378,18 @@ def write_eig(seedname: str, eig: np.ndarray) -> None:
     Format:
       band_index  k_index  eigenvalue
     """
+    seedname = Path(seedname)
+    filename = seedname.parent / f"{seedname.stem}.eig"
+    filename.parent.mkdir(parents=True, exist_ok=True)
     eig = np.asarray(eig, float)
     num_kpts, num_bands = eig.shape
-    with open(seedname + ".eig", "w") as f:
+    with open(filename, "w") as f:
         for ik in range(num_kpts):
             for m in range(num_bands):
                 f.write(f"{m+1:5d} {ik+1:5d} {eig[ik, m]:20.12f}\n")
 
 
-def write_amn(seedname: str, A: np.ndarray, comment: str = "created by python") -> None:
+def write_amn(seedname: str | Path, A: np.ndarray, comment: str = "created by python") -> None:
     """
     Write seedname.amn
 
@@ -147,9 +400,12 @@ def write_amn(seedname: str, A: np.ndarray, comment: str = "created by python") 
       num_bands  num_kpts  num_wann
       m  ik  n  Re  Im    (one line per element)
     """
+    seedname = Path(seedname)
+    filename = seedname.parent / f"{seedname.stem}.amn"
+    filename.parent.mkdir(parents=True, exist_ok=True)
     A = np.asarray(A, complex)
     num_kpts, num_bands, num_wann = A.shape
-    with open(seedname + ".amn", "w") as f:
+    with open(filename, "w") as f:
         f.write(comment.strip() + "\n")
         f.write(f"{num_bands:6d} {num_kpts:6d} {num_wann:6d}\n")
         for ik in range(num_kpts):
@@ -196,16 +452,19 @@ def write_amn(seedname: str, A: np.ndarray, comment: str = "created by python") 
 #                     z = M[idx, m, n]
 #                     f.write(f"{z.real:18.12f} {z.imag:18.12f}\n")
 
-def write_mmn(seedname: str, M: np.ndarray, num_kpts: int, nn_list: np.ndarray) -> None:
+def write_mmn(seedname: str | Path, M: np.ndarray, num_kpts: int, nn_list: np.ndarray) -> None:
     """Write seedname.mmn (Wannier90).
 
     M[idx, m, n] corresponds to the neighbor record nn_list[idx] = (ik, ikb, g1, g2, g3),
     with m fastest as in Wannier90.
     
     """
+    seedname = Path(seedname)
+    filename = seedname.parent / f"{seedname.stem}.mmn"
+    filename.parent.mkdir(parents=True, exist_ok=True)
     _, num_bands, _ = M.shape
     nntot = nn_list.shape[0] // num_kpts
-    with open(seedname + ".mmn", "w") as f:
+    with open(filename, "w") as f:
         f.write("created by python\n")
         f.write(f"{num_bands:6d} {num_kpts:6d} {nntot:6d}\n")
         for idx, (ik, ikb, n1, n2, n3) in enumerate(nn_list):
@@ -272,30 +531,30 @@ def _read_u_mat_int(filename: str) -> Tuple[np.ndarray, np.ndarray]:
                     U[ik, i, j] = re + 1j * im
     return U, kpts
 
-def read_u_mat(seedname: str, disentanglement: bool = False) -> Tuple[np.ndarray, np.ndarray]:
+def read_u_mat(seedname: str | Path, disentanglement: bool = False) -> Tuple[np.ndarray, np.ndarray]:
     """
     Read Wannier90 seedname_u.mat.
-
+    Give the seedname as input (without .mat).
     Returns
     -------
     U : (Nk, Nwann, Nwann) complex
     kpts : (Nk, 3) fractional k-point coordinates
     """
-    filename = f"{seedname}_u.mat"
-    filename = f"{seedname}_u.mat"
-    U, kpts =  _read_u_mat_int(filename)
+    seedname = Path(seedname)
+    filename = seedname.parent / f"{seedname.stem}.mat"
+    U, kpts =  _read_u_mat_int(str(filename))
     num_kpts = kpts.shape[0]
     U_out = U.copy()
     if disentanglement:
-        filename_dis = f"{seedname}_u_dis.mat"
-        U_dist, kpts_dis = _read_u_mat_int(filename_dis)
+        filename_dis = seedname.parent / f"{seedname.stem}_dis.mat"
+        U_dist, kpts_dis = _read_u_mat_int(str(filename_dis))
         if not np.allclose(kpts, kpts_dis):
             raise ValueError("k mesh for U_dist and U does not match")
         U_out = np.array([U_dist[i] @ U[i] for i in range(num_kpts)])
     return U_out, kpts
 
 def write_u_mat(
-    seedname: str,
+    seedname: str | Path,
     U: np.ndarray,
     kpts: np.ndarray,
     *,
@@ -309,7 +568,7 @@ def write_u_mat(
 
     Parameters
     ----------
-    seedname : str
+    seedname : str or Path
         Wannier90 seedname.
     U : ndarray, shape (Nk, num_bloch, num_wann)
         Gauge matrix.
@@ -318,6 +577,10 @@ def write_u_mat(
     comment : str
         Header comment line.
     """
+    seedname = Path(seedname)
+    filename = seedname.parent / f"{seedname.stem}.mat"
+    filename.parent.mkdir(parents=True, exist_ok=True)
+    
     U = np.asarray(U, complex)
     kpts = np.asarray(kpts, float)
 
@@ -329,8 +592,6 @@ def write_u_mat(
     Nk, num_bloch, num_wann = U.shape
     if kpts.shape[0] != Nk:
         raise ValueError("kpts and U must have the same number of k-points.")
-    
-    filename = f"{seedname}_u.mat"
 
     with open(filename, "w") as f:
         # header
@@ -415,13 +676,53 @@ def build_mmn_from_nnkp(lat: MoireLattice, eigvecs: np.ndarray, nn_list: np.ndar
     nn_list rows are: (ik, ikb, g1, g2, g3), with ik/ikb **1-based** (Wannier90 convention).
     """
     nn_list = np.asarray(nn_list, dtype=int)
-    M_list = []
-    for ik, ikb, g1, g2, g3 in nn_list:
-        V1 = eigvecs[ik-1]
-        V2 = eigvecs[ikb-1]
-        R = lat.embedding_matrix((g1, g2))
-        M_list.append(V1.conj().T @ R @ V2)
-    return np.asarray(M_list)
+
+    # Shapes:
+    # eigvecs: (Nk, dim, nbands)
+    # We want M[idx] = V1.conj().T @ R @ V2  -> (nbands, nbands)
+
+    if nn_list.size == 0:
+        return np.zeros((0, eigvecs.shape[2], eigvecs.shape[2]), dtype=complex)
+
+    nrec = nn_list.shape[0]
+    dim = eigvecs.shape[1]
+    nbands = eigvecs.shape[2]
+
+    ik_idx = nn_list[:, 0].astype(int) - 1
+    ikb_idx = nn_list[:, 1].astype(int) - 1
+
+    # Build stacked arrays for vectorized matmuls
+    # R_stack: (nrec, dim, dim)
+    R_stack = np.empty((nrec, dim, dim), dtype=complex)
+    for idx, (_, _, g1, g2, g3) in enumerate(nn_list):
+        R_stack[idx] = lat.embedding_matrix((g1, g2))
+
+    # V2_stack: (nrec, dim, nbands)
+    V2_stack = eigvecs[ikb_idx]
+    # V1_conjT_stack: (nrec, nbands, dim)
+    V1_conjT_stack = np.conjugate(eigvecs[ik_idx]).transpose(0, 2, 1)
+
+    # tmp = R @ V2  -> (nrec, dim, nbands)
+    tmp = np.matmul(R_stack, V2_stack)
+
+    # M_stack = V1_conjT @ tmp -> (nrec, nbands, nbands)
+    M_stack = np.matmul(V1_conjT_stack, tmp)
+
+    # Verification: ensure vectorized result matches reference (previous loop)
+    # Compute reference with the original loop for correctness check.
+    # M_ref = []
+    # for ik, ikb, g1, g2, g3 in nn_list:
+    #     V1 = eigvecs[ik - 1]
+    #     V2 = eigvecs[ikb - 1]
+    #     R = lat.embedding_matrix((g1, g2))
+    #     M_ref.append(V1.conj().T @ R @ V2)
+    # M_ref = np.asarray(M_ref)
+
+    # if not np.allclose(M_stack, M_ref, rtol=1e-8, atol=1e-12):
+    #     diff = np.max(np.abs(M_stack - M_ref))
+    #     raise ValueError(f"Vectorized build_mmn_from_nnkp differs from reference (max abs diff={diff})")
+
+    return M_stack
 
 def _write_int_block(f, arr: np.ndarray) -> None:
     arr = np.asarray(arr, dtype=int).ravel()
@@ -431,7 +732,7 @@ def _write_int_block(f, arr: np.ndarray) -> None:
 
 
 def write_dmn(
-    seedname: str,
+    seedname: str | Path,
     num_bands: int,
     num_wann: int,
     full_to_irr: np.ndarray,
@@ -450,12 +751,18 @@ def write_dmn(
 
     Parameters
     ----------
+    seedname : str or Path
+        Wannier90 seedname.
     full_to_irr : (num_kpts,) 1-based indices mapping each full k to an irreducible k index
     irr_kpts : (nkptirr,) 1-based indices of irreducible k-points in the full list
     sym_kpt_map : (nkptirr, nsym) 1-based indices of g*k_irr in the full list
     D_wann : (nsym, nkptirr, num_wann, num_wann)
     D_band : (nsym, nkptirr, num_bands, num_bands)
     """
+    seedname = Path(seedname)
+    filename = seedname.parent / f"{seedname.stem}.dmn"
+    filename.parent.mkdir(parents=True, exist_ok=True)
+    
     full_to_irr = np.asarray(full_to_irr, dtype=int).ravel()
     irr_kpts = np.asarray(irr_kpts, dtype=int).ravel()
     sym_kpt_map = np.asarray(sym_kpt_map, dtype=int)
@@ -478,7 +785,7 @@ def write_dmn(
     if sym_kpt_map.shape != (nkptirr, nsym):
         raise ValueError("sym_kpt_map shape must be (nkptirr, nsym).")
 
-    with open(seedname + ".dmn", "w") as f:
+    with open(filename, "w") as f:
         f.write(comment.strip() + "\n")
         f.write(f"{num_bands:6d} {nsym:6d} {nkptirr:6d} {num_kpts:6d}\n\n")
 
@@ -525,84 +832,173 @@ def make_U_from_wanniers(wan: np.ndarray, eigvecs: np.ndarray) -> np.ndarray:
     U = np.array([eigvecs[i].T.conj() @ wan[i] for i in range(numk)])
     return U
 
-def write_w90_files(seed, model: BMModel, recipe: WannierizationRecipe, * ,
-                    eigvals: np.ndarray| None = None, do_write_eig: bool = True,
-                    eigvecs: np.ndarray| None = None, read_from_cache: bool = True,
-                    group: SymmetryGroup| None = None, sym_adapted: bool = False,
-                    no_trials: bool = False) -> None:
-    # 1) Model + mesh + eigensystem
-    if not Path(f'{seed}.win').exists():
-        raise RuntimeError("No win file found.")
+def write_w90_files(
+    model: BMModel,
+    recipe: WannierizationRecipe,
+    *,
+    seedname: str | Path | None = None,
+    wan90_root: str | Path = "wan90",
+    eigvals: np.ndarray | None = None,
+    do_write_eig: bool = True,
+    eigvecs: np.ndarray | None = None,
+    read_from_cache: bool = True,
+    group: SymmetryGroup | None = None,
+    sym_adapted: bool = False,
+    disentangle: bool = False,
+    no_trials: bool = False,
+    force_localization: bool = False,
+    wannier90_x_path: Optional[str | Path] = None,
+) -> Path:
+    """
+    Write Wannier90 input files organized in ./wan90/{module_name}/ directory.
+    
+    This function orchestrates the entire Wannier90 workflow:
+    1. Creates organized directory ./wan90/{module_name}/
+    2. Generates and writes .win file (Python-generated, no templates)
+    3. Computes or loads eigensystem
+    4. Writes .eig (eigenvalues)
+    5. Writes .amn (projection overlap)
+    6. Runs wannier90 to generate .nnkp
+    7. Writes .mmn (neighbor overlaps)
+    8. Optionally writes .dmn (symmetry-adapted)
+    
+    Parameters
+    ----------
+    model : BMModel
+        Model with parameters, lattice, and solver config.
+    recipe : WannierizationRecipe
+        Wannierization config (trial orbitals, EBR sequence).
+    wan90_root : str or Path
+        Root directory for Wannier90 files (default: 'wan90').
+    eigvals : ndarray, optional
+        Eigenvalues (Nk, nbands). If None and read_from_cache=True, loaded from cache.
+    do_write_eig : bool
+        Write .eig file (default: True).
+    eigvecs : ndarray, optional
+        Eigenvectors (Nk, dim, nbands). If None and read_from_cache=True, loaded from cache.
+    read_from_cache : bool
+        Load eigensystem from cache (default: True).
+    group : SymmetryGroup, optional
+        Symmetry group for sym_adapted mode.
+    sym_adapted : bool
+        Write symmetry-adapted .dmn file (default: False).
+    disentangle : bool
+        Enable disentanglement (default: True).
+    no_trials : bool
+        Skip trial orbital generation (use identity) (default: False).
+    wannier90_x_path : str, Path, or None
+        Path to wannier90.x executable. If None, searches automatically.
+    
+    Returns
+    -------
+    Path
+        Work directory where files were written.
+    """
+    # 1) Setup directory structure
+    module_name = module_name_from_model(model)
+    work_dir = ensure_wan90_workdir(
+        module_name,
+        wan90_root=wan90_root,
+        wannier90_x_path=wannier90_x_path,
+    )
+    if seedname is None:
+        seedname = model.params.name    
+    seed = work_dir / seedname
+
     lat = model.lat
     k_mesh, k_frac = lat.k_cart, lat.k_frac
+    num_kpoints = k_mesh.shape[0]
+    if sym_adapted and group is None:
+        raise ValueError("Symmetry group must be provided if sym_adapted=True")
 
+    # 2) Load or compute eigensystem
     if read_from_cache:
         _, eigvals, eigvecs, cache_path = get_eigensystem_cached(model, cache_dir="cache")
-        print("Loaded/computed eigensystem at:", cache_path)
+        print(f"Loaded eigensystem from cache: {cache_path}")
     elif eigvecs is None:
-        raise ValueError("If not read from cache, eigenvectors should be provided.")        
-
-    # 2) Trials -> Löwdin -> AMN
-
+        raise ValueError("If not read from cache, eigenvectors must be provided.")
+    
+    num_bands = eigvecs.shape[-1]
+    num_wann = recipe.num_wann
+    
+    # 3) Generate and write .win file (Python-generated, no template)
+    win_path = work_dir / f"{seedname}.win"
+    write_win(
+        win_path,
+        num_wann=num_wann,
+        num_bands=num_bands,
+        N_k=lat.N_k,
+        disentangle=disentangle,
+        sym_adapted=sym_adapted,
+    )
+    print(f"Generated .win file: {win_path}")
+    
+    # 4) Write .eig (eigenvalues)
     if do_write_eig:
         if eigvals is None:
-            raise ValueError("Eigenvalues should be provided if write .eig file.")
+            raise ValueError("Eigenvalues must be provided if do_write_eig=True.")
         write_eig(seed, eigvals)
-        print(f'Wrote:  {seed}.eig')
-
+        print(f"Wrote eigenvalues: {seed}.eig")
+    
+    # 5) Write .amn (projection overlap)
     if no_trials:
-        print("Skipping trial functions as requested.")
-        A = np.eye(eigvals.shape[1], eigvals.shape[1])[np.newaxis, :, :].repeat(eigvals.shape[0], axis=0)
+        print("Skipping trial functions; using identity projection.")
+        A = np.eye(num_bands, num_wann)[np.newaxis, :, :].repeat(num_kpoints, axis=0)
     else:
         builder = TrialBuilder(lat, recipe)
         trials = builder.build_all(k_mesh)
         A = build_amn_from_trials(eigvecs, trials)
     write_amn(seed, A)
-
-    # 3) MMN (needs seed.nnkp from Wannier90)
-    if not Path(f'{seed}.nnkp').exists():
-        subprocess.run(["./wannier90.x", '-pp', f"{seed}"])
-    parsed = parse_nnkp(seed + ".nnkp")
+    print(f"Wrote projections: {seed}.amn")
+    
+    # 6) Run Wannier90 to generate .nnkp
+    nnkp_path = work_dir / f"{seedname}.nnkp"
+    if not nnkp_path.exists():
+        print(f"Running wannier90.x -pp to generate .nnkp...")
+        result = subprocess.run(
+            ["./wannier90.x", "-pp", seedname],
+            cwd=str(work_dir),
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            print("STDOUT:", result.stdout)
+            print("STDERR:", result.stderr)
+            raise RuntimeError(f"wannier90.x failed with return code {result.returncode}")
+        print(f"Generated .nnkp: {nnkp_path}")
+    
+    # 7) Write .mmn (neighbor overlaps)
+    nnkp_full_path = str(nnkp_path)
+    parsed = parse_nnkp(nnkp_full_path)
     nn_list = parsed.get("nn_list", None)
-
-
+    if nn_list is None:
+        raise RuntimeError(f"No nn_list found in {nnkp_path}")
+    
     M = build_mmn_from_nnkp(lat, eigvecs, nn_list)
     write_mmn(seed, M, num_kpts=len(k_mesh), nn_list=nn_list)
-    print(f"Wrote:  {seed}.amn {seed}.mmn")
+    print(f"Wrote overlaps: {seed}.mmn")
+    
+    # 8) Optional: Write .dmn (symmetry-adapted Wannierization)
     if sym_adapted:
-        if group is None:
-            raise ValueError("Symmetry group should be provided if one intends to use symmetry adapted mode")
-        # 5) D_band for full group
-        D_band, elem_names = build_D_band_from_group(group, lat, eigvecs)
-        # old elements we compare (same set as your old build_D_wann default)
-        # D_band, num_bands, _ = build_D_band(k_mesh=k_mesh, vec=eigvecs, lat=lat, sym_labels=labels)
-        # [print(np.trace(D_band[1, ik, :, :])) for ik in [0, 14, 28, 11, 16, 21, 31]]
+        print("Building symmetry-adapted Wannierization...")
         
-
-        # 6) D_wann for full group from EBR targets (generators -> compose)
+        # D_band for full group
+        D_band, elem_names = build_D_band_from_group(group, lat, eigvecs)
+        
+        # D_wann for full group from EBR targets
         D_wann_gens = build_D_wann_generators_from_EBRs(
             ebr_sequence=list(recipe.ebr_sequence),
             lat=lat,
             generators_needed=["C3z", "C2x"],
         )
-
         D_wann, elem_names2 = build_D_wann_from_group(group, lat, D_wann_gens)
-        # assert elem_names2 == elem_names
-        # D_wann, num_wann, _ = build_D_wann(ebr_sequence=recipe.ebr_sequence, k_mesh=k_mesh, lat=lat, sym_labels=labels)
-
-        # 7) dmn maps (irr = full mesh)
-        # k_maps, G_lists = build_k_maps(k_frac)
-        # sym_kpt_map = np.zeros((k_mesh.shape[0], len(labels)), dtype=int)
-        # for isym, sym in enumerate(labels):
-        #     sym_kpt_map[:, isym] = np.array(k_maps[sym]) + 1
-        # irr_kpts = full_to_irr = np.arange(1, k_mesh.shape[0] + 1, dtype=int)   # 1-based
+        
+        # DMN maps (trivial irreducible k structure)
         full_to_irr, irr_kpts, sym_kpt_map, _ = build_dmn_maps_trivial_irr(
             group, lat, elem_names=elem_names
         )
-
-        # 8) write dmn
-        num_bands = eigvecs.shape[-1]
-        num_wann = D_wann.shape[-1]
+        
+        # Write .dmn
         write_dmn(
             seedname=seed,
             num_bands=num_bands,
@@ -612,7 +1008,30 @@ def write_w90_files(seed, model: BMModel, recipe: WannierizationRecipe, * ,
             sym_kpt_map=sym_kpt_map,
             D_wann=D_wann,
             D_band=D_band,
-            comment="Generated by tbg_wannier group-aware helper",
+            comment="Generated by tbg_wannier",
         )
-        print(f'Symmetry Adapted mode enabled, wrote {seed}.dmn')
+        print(f"Wrote symmetry matrices: {seed}.dmn")
+    
+    # 9) Auto-run Wannier90 full optimization if U-matrix not found
+    u_mat_path = work_dir / f"{seedname}_u.mat"
+    if not u_mat_path.exists() or force_localization:
+        print(f"\nRunning wannier90.x for full optimization (U-matrix not found)...")
+        result = subprocess.run(
+            ["./wannier90.x", seedname],
+            cwd=str(work_dir),
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            print("STDOUT:", result.stdout)
+            print("STDERR:", result.stderr)
+            raise RuntimeError(f"wannier90.x failed with return code {result.returncode}")
+        print(f"Generated U-matrix: {u_mat_path}")
+    else:
+        print(f"\nU-matrix already exists at {u_mat_path}")
+    
+    print(f"\nWannier90 workflow complete!")
+    print(f"Work directory: {work_dir}")
+    print(f"U-matrix: {u_mat_path}")
+    return work_dir
 
