@@ -41,7 +41,7 @@ def find_valid_start(lat, shape_func, seed, search_n=10):
 
 def attach_square_leads(syst: kwant.Builder, width: float, height: float,
                         lead_a: float = 10.0, lead_t: float = 100.0,
-                        coupling_t: float = 50.0, cutoff_nm: float = 15.0):
+                        coupling_t: float = 50.0, cutoff: float = 15.0):
     """
     Attaches square lattice leads to the top and bottom of the system.
     Handles lattice mismatch by adding a 'connector' buffer region.
@@ -50,10 +50,10 @@ def attach_square_leads(syst: kwant.Builder, width: float, height: float,
         syst: The populated finite system builder.
         width: Width of the scattering region.
         height: Height of the scattering region.
-        lead_a: Lattice constant of the square lead (nm).
+        lead_a: Lattice constant of the square lead (Angstrom).
         lead_t: Hopping parameter for the lead (meV).
         coupling_t: Tunneling hopping between TBG and Lead (meV).
-        cutoff_nm: Distance cutoff for coupling hoppings.
+        cutoff: Distance cutoff for coupling hoppings.(Angstrom)
     """
     print("\n--- Attaching Square Leads ---")
     
@@ -107,8 +107,8 @@ def attach_square_leads(syst: kwant.Builder, width: float, height: float,
     tree_tbg = cKDTree(pos_tbg)
     
     # Find neighbors within cutoff
-    print(f"  > Computing couplings (cutoff={cutoff_nm} nm)...")
-    results = tree_lead.query_ball_tree(tree_tbg, r=cutoff_nm)
+    print(f"  > Computing couplings (cutoff={cutoff} nm)...")
+    results = tree_lead.query_ball_tree(tree_tbg, r=cutoff)
     
     # Coupling Matrix (Simple scalar tunneling * Identity)
     mat_coupling = ta.array(coupling_t * np.eye(10))
@@ -118,14 +118,9 @@ def attach_square_leads(syst: kwant.Builder, width: float, height: float,
         site_lead = sites_lead[i_lead]
         for i_tbg in neighbors:
             site_tbg = sites_tbg[i_tbg]
+            syst[site_lead, site_tbg] = mat_coupling
+            count += 1
             
-            # Distance check (redundant but safe)
-            d = np.linalg.norm(site_lead.pos - site_tbg.pos)
-            if d < cutoff_nm:
-                # Add hermitian hopping
-                syst[site_lead, site_tbg] = mat_coupling
-                count += 1
-                
     print(f"  > Added {count} coupling hoppings.")
 
     # 4. Construct and Attach Infinite Leads

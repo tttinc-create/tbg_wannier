@@ -74,7 +74,7 @@ def filter_hopping_by_separation(
     # Optional: Print stats
     total_elements = keep_mask.size
     kept_elements = np.sum(keep_mask)
-    print(f"Filter applied (cutoff={cutoff} nm): Kept {kept_elements}/{total_elements} ({kept_elements/total_elements:.1%}) hopping elements.")
+    print(f"Filter applied (cutoff={cutoff} Angstrom): Kept {kept_elements}/{total_elements} ({kept_elements/total_elements:.1%}) hopping elements.")
     
     return HR_filtered, keep_mask
 
@@ -93,8 +93,6 @@ def build_hopping_from_U(lat: MoireLattice, eigvals: np.ndarray, U: np.ndarray) 
     k_frac = lat.k_frac
     Hk = build_wannier_Hk(eigvals, U)
     HR, R_cart = hk_to_hr_fft2(lat, Hk=Hk, k_frac=k_frac)
-    print(f"✓ Real-space Hamiltonian computed: {len(R_cart)} R-vectors")
-    print(f"  HR shape: {HR.shape}, R_cart shape: {R_cart.shape}")
     return HR, R_cart
 
 def solve_wannier_bands(k_path: np.ndarray, HR: np.ndarray, R_cart: np.ndarray):

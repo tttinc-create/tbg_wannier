@@ -1228,6 +1228,13 @@ def run_workflow_for_angle(
 
         w_8b = make_wanniers_from_U(U_8b_sym, psi_orthocomp)
         wanniers = np.concatenate((w_zhida, w_8b), axis=-1)
+
+        # Save the Wannier functions used for plotting so they're available
+        # later (e.g., for analysis or re-plotting).
+        wannier_save_path = work_dir / f"{seed}_10b_wanniers.npz"
+        np.savez_compressed(str(wannier_save_path), wanniers=wanniers)
+        print(f"Saved Wannier functions for plotting: {wannier_save_path}")
+
         U_res = make_U_from_wanniers(wanniers, vec10b)
         u_mat_path_10b = work_dir / f"{seed}_10b_u.mat"
         write_eig(work_dir / f"{seed}_10b.eig", eig10b)
