@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from typing import Callable, Literal, Tuple
 
 import numpy as np
-import scipy.linalg
 from .config import WannierizationRecipe
 from .lattice import MoireLattice
 from .utils import sx, kron
@@ -363,6 +362,44 @@ class TrialBuilder:
 #         out.append(V @ A @ S_mhalf)
 #     return np.asarray(out)
 
+# import numpy as np
+
+def lowdin_project(eigvecs: np.ndarray, trials: np.ndarray) -> np.ndarray:
+    """
+    Vectorized Löwdin orthonormalization of the projected trial subspace using SVD.
+
+    Parameters
+    ----------
+    eigvecs : np.ndarray
+        Shape (Nk, dim, nbands). The eigenvectors (psi).
+    trials : np.ndarray
+        Shape (Nk, dim, nwann). The trial orbitals (phi).
+
+    Returns
+    -------
+    U : np.ndarray
+        Shape (Nk, nbands, nwann). Löwdin-orthonormalized overlap U.
+    """
+    # 1. Compute projection matrix A = <psi | phi>
+    # We swap axes to perform: (Nk, nbands, dim) @ (Nk, dim, nwann) -> (Nk, nbands, nwann)
+    # Numpy matmul (@) broadcasts over the first dimension (Nk) automatically.
+    A = np.matmul(eigvecs.conj().swapaxes(1, 2), trials)
+
+    # 2. Perform Singular Value Decomposition on the projection matrices
+    # A = U * Sigma * Vh
+    # np.linalg.svd is vectorized over the stack of matrices (the Nk dimension)
+    U, _, Vh = np.linalg.svd(A, full_matrices=False)
+
+    # 3. Compute the orthonormalized coefficients: A_ortho = U @ Vh
+    # This is mathematically equivalent to A @ (A^dag A)^(-1/2)
+    A_ortho = np.matmul(U, Vh)
+
+    # 4. Transform back to the original basis
+    # W = |psi> @ A_ortho
+    # (Nk, dim, nbands) @ (Nk, nbands, nwann) -> (Nk, dim, nwann)
+    # W = np.matmul(eigvecs, A_ortho)
+
+    return A_ortho
 
 # def re_wannierization(w_input: np.ndarray, eigvecs: np.ndarray, kmesh: np.ndarray, sigma: float = 0.25) -> np.ndarray:
 #     """Your notebook's re_wannierization (ported).

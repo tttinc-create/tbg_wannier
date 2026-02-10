@@ -17,7 +17,8 @@ import matplotlib.colors as mcolors
 from math import ceil, sqrt
 from .fourier import compute_real_space_wannier
 
-def plot_band_structure(kdist: np.ndarray, evals: np.ndarray, ticks: List[int], ticklabels: List[str], title: str = "fig"):
+def plot_band_structure(kdist: np.ndarray, evals: np.ndarray, ticks: List[int],
+                         ticklabels: List[str], savepath: str | None = None):
     """
     Plot band structure along a k path.
 
@@ -27,36 +28,16 @@ def plot_band_structure(kdist: np.ndarray, evals: np.ndarray, ticks: List[int], 
     evals : (N, nbands)
     """
     fig, ax = plt.subplots()
-    ax.plot(kdist, evals, 'or', markersize=1)
+    ax.plot(kdist, evals, markersize=1)
     for t in ticks:
         ax.axvline(kdist[t], color='k', linestyle='--', linewidth=0.7) 
     ax.set_xticks([kdist[t] for t in ticks])
     ax.set_xticklabels(ticklabels)
     ax.set_xlabel("k-path")
     ax.set_ylabel("Energy (meV)")
-    ax.set_title(title)
+    # ax.set_title(title)
     ax.grid(True, alpha=0.3)
-    fig.savefig(title)
-
-
-# def plot_fat_bands(kdist: np.ndarray, evals: np.ndarray, weights: np.ndarray, ticks: List[int], ticklabels: List[str], title: str = "", scale: float = 80.0):
-#     """
-#     Plot fat bands: scatter with marker size proportional to weights.
-
-#     weights should be (N, nbands) in [0,1].
-#     """
-#     fig, ax = plt.subplots()
-#     N, nb = evals.shape
-#     for m in range(nb):
-#         ax.scatter(kdist, evals[:, m], s=scale * weights[:, m], alpha=0.7)
-#         ax.plot(kdist, evals[:, m], linewidth=0.5, alpha=0.4)
-#     ax.set_xticks([kdist[t] for t in ticks])
-#     ax.set_xticklabels(ticklabels)
-#     ax.set_xlabel("k-path")
-#     ax.set_ylabel("Energy (meV)")
-#     ax.set_title(title)
-#     ax.grid(True, alpha=0.3)
-#     return fig, ax
+    fig.savefig(savepath)
 
 
 def plot_density(r1: np.ndarray, r2: np.ndarray, rho: np.ndarray, title: str = ""):
@@ -230,6 +211,7 @@ def plot_real_space_wanniers(
     figsize: tuple[float, float] | None = None,
     cmap: str = "inferno",
     rlim: float = 8.0,
+    suptitle: str | None = "",
     savepath: str | None = None,
 ):
     """
@@ -315,10 +297,10 @@ def plot_real_space_wanniers(
         ax.axis("off")
 
     layer_str = "+" if layer == 1 else "-"
-    # fig.suptitle(
-    #     rf"Real-space Wannier density $|\psi_{{\alpha{layer_str},{beta_idx}}}(r)|^2$",
-    #     fontsize=14,
-    # )
+    fig.suptitle(
+        rf"Real-space Wannier density $|\psi_{{\alpha{layer_str},{beta_idx}}}(r)|^2$" + suptitle,
+        fontsize=14,
+    )
     fig.tight_layout(rect=[0, 0, 1, 0.95])
 
     if savepath is not None:
@@ -326,14 +308,6 @@ def plot_real_space_wanniers(
         print(f"Saved Wannier plot to {savepath}")
 
     return fig, axes
-
-
-import numpy as np
-import matplotlib.pyplot as plt
-from matplotlib import colors
-from matplotlib.transforms import Affine2D
-from typing import Optional, Tuple
-
 
 def plot_hr_tiles_simple_triangular(
     HR_grid: np.ndarray,
@@ -386,16 +360,11 @@ def plot_hr_tiles_simple_triangular(
     elif component == "imag":
         Z = np.imag(HR_grid)
         clabel = r"$\Im\,H_{mn}(R)$"
-    elif component == "minabs":
-        ceil = 2.0
-        sample = np.ones_like(HR_grid, dtype=float) * ceil 
-        Z = np.minimum(np.abs(HR_grid), sample)
-        clabel = rf"max($|H_{{mn}}(R)|$, {ceil})"
     else:
         raise ValueError("Invalid component.")
 
     if vmin is None:
-        vmin = max(float(np.min(Z)), eps)
+        vmin = float(np.min(Z))
     if vmax is None:
         vmax = float(np.max(Z))
     
@@ -428,7 +397,7 @@ def plot_hr_tiles_simple_triangular(
     if scale == "linear":
         norm = mcolors.Normalize(vmin, vmax, clip=True)
     elif scale == "log":
-        norm = mcolors.LogNorm(vmin, vmax, clip=True)
+        norm = mcolors.SymLogNorm(linthresh=eps, vmin=vmin, vmax=vmax, clip=True)
     for ix in range(Nx):
         for iy in range(Ny):
             Rx, Ry = R_cart_grid[ix, iy, :2]
@@ -475,138 +444,138 @@ def plot_hr_tiles_simple_triangular(
         fig.savefig(savepath, dpi=300, bbox_inches="tight")
 
 
-def plot_hr_realspace_colormesh(
-    HR_grid: np.ndarray,
-    R_cart_grid: np.ndarray,
-    *,
-    # m: int,
-    # n: int,
-    component: str = "abs",   # "abs" | "real" | "imag"
-    cmap: str = "viridis",
-    vmin: float | None = None,
-    vmax: float | None = None,
-    figsize: tuple[float, float] = (6.5, 5.5),
-    title: str | None = None,
-    show_unitcell: bool = False,
-    savepath: str | None = None,
-):
-    """
-    Plot hopping H_{mn}(R) on the real-space lattice as a Cartesian colored mesh.
+# def plot_hr_realspace_colormesh(
+#     HR_grid: np.ndarray,
+#     R_cart_grid: np.ndarray,
+#     *,
+#     # m: int,
+#     # n: int,
+#     component: str = "abs",   # "abs" | "real" | "imag"
+#     cmap: str = "viridis",
+#     vmin: float | None = None,
+#     vmax: float | None = None,
+#     figsize: tuple[float, float] = (6.5, 5.5),
+#     title: str | None = None,
+#     show_unitcell: bool = False,
+#     savepath: str | None = None,
+# ):
+#     """
+#     Plot hopping H_{mn}(R) on the real-space lattice as a Cartesian colored mesh.
 
-    Parameters
-    ----------
-    HR_grid : (Nkx, Nky, Nw, Nw) complex
-        Real-space hoppings on the R grid (from hk_to_hr_fft2 meta["HR_grid"]).
-    R_cart_grid : (Nkx, Nky, d) float
-        Cartesian R vectors for each grid point (from hk_to_hr_fft2 meta["R_cart_grid"]).
-        d can be 2 or 3 (only first 2 used).
-    m, n : int
-        Wannier indices to plot H_{mn}(R).
-    component : str
-        Which scalar to plot: "abs", "real", or "imag".
-    shift_center : bool
-        If True, subtract the mean R so the plot is centered around the origin.
-        (Useful if you used fftshift and want (0,0) in the middle visually.)
-    cmap, vmin, vmax : matplotlib settings
-    show_unitcell : bool
-        If True, draw the parallelogram spanned by the two lattice steps.
-    savepath : optional str
-        If provided, saves figure.
+#     Parameters
+#     ----------
+#     HR_grid : (Nkx, Nky, Nw, Nw) complex
+#         Real-space hoppings on the R grid (from hk_to_hr_fft2 meta["HR_grid"]).
+#     R_cart_grid : (Nkx, Nky, d) float
+#         Cartesian R vectors for each grid point (from hk_to_hr_fft2 meta["R_cart_grid"]).
+#         d can be 2 or 3 (only first 2 used).
+#     m, n : int
+#         Wannier indices to plot H_{mn}(R).
+#     component : str
+#         Which scalar to plot: "abs", "real", or "imag".
+#     shift_center : bool
+#         If True, subtract the mean R so the plot is centered around the origin.
+#         (Useful if you used fftshift and want (0,0) in the middle visually.)
+#     cmap, vmin, vmax : matplotlib settings
+#     show_unitcell : bool
+#         If True, draw the parallelogram spanned by the two lattice steps.
+#     savepath : optional str
+#         If provided, saves figure.
 
-    Returns
-    -------
-    fig, ax
-    """
-    HR_grid = np.asarray(HR_grid)
-    R_cart_grid = np.asarray(R_cart_grid)
-    Nkx, Nky, Nw, Nw2 = HR_grid.shape
-    if Nw != Nw2:
-        raise ValueError("HR_grid must have shape (Nkx, Nky, Nw, Nw).")
-    # if not (0 <= m < Nw and 0 <= n < Nw):
-    #     raise IndexError("m or n out of range for HR_grid.")
-    if R_cart_grid.shape[0] != Nkx or R_cart_grid.shape[1] != Nky:
-        raise ValueError("R_cart_grid must match HR_grid first two dimensions.")
+#     Returns
+#     -------
+#     fig, ax
+#     """
+#     HR_grid = np.asarray(HR_grid)
+#     R_cart_grid = np.asarray(R_cart_grid)
+#     Nkx, Nky, Nw, Nw2 = HR_grid.shape
+#     if Nw != Nw2:
+#         raise ValueError("HR_grid must have shape (Nkx, Nky, Nw, Nw).")
+#     # if not (0 <= m < Nw and 0 <= n < Nw):
+#     #     raise IndexError("m or n out of range for HR_grid.")
+#     if R_cart_grid.shape[0] != Nkx or R_cart_grid.shape[1] != Nky:
+#         raise ValueError("R_cart_grid must match HR_grid first two dimensions.")
 
-    Rxy = R_cart_grid[..., :2]  # (Nkx, Nky, 2)
-    Rx = Rxy[:, :, 0]
-    Ry = Rxy[:, :, 1]
-    # Choose scalar field
-    # Hmn = HR_grid[:, :, m, n]
-    Hmn = np.max(np.abs(HR_grid), axis=(2,3))
-    if component == "abs":
-        Z = np.abs(Hmn)
-        clabel = r"$|H_{mn}(\mathbf{R})|$"
-    elif component == "real":
-        Z = np.real(Hmn)
-        clabel = r"$\Re\,H_{mn}(\mathbf{R})$"
-    elif component == "imag":
-        Z = np.imag(Hmn)
-        clabel = r"$\Im\,H_{mn}(\mathbf{R})$"
-    elif component == "logabs":
-        Z = np.log10(np.abs(Hmn) + 1e-12)
-        clabel = r"$\log_{10}|H_{mn}(\mathbf{R})|$"
-    else:
-        raise ValueError("component must be one of {'abs','real','imag'}.")
+#     Rxy = R_cart_grid[..., :2]  # (Nkx, Nky, 2)
+#     Rx = Rxy[:, :, 0]
+#     Ry = Rxy[:, :, 1]
+#     # Choose scalar field
+#     # Hmn = HR_grid[:, :, m, n]
+#     Hmn = np.max(np.abs(HR_grid), axis=(2,3))
+#     if component == "abs":
+#         Z = np.abs(Hmn)
+#         clabel = r"$|H_{mn}(\mathbf{R})|$"
+#     elif component == "real":
+#         Z = np.real(Hmn)
+#         clabel = r"$\Re\,H_{mn}(\mathbf{R})$"
+#     elif component == "imag":
+#         Z = np.imag(Hmn)
+#         clabel = r"$\Im\,H_{mn}(\mathbf{R})$"
+#     elif component == "logabs":
+#         Z = np.log10(np.abs(Hmn) + 1e-12)
+#         clabel = r"$\log_{10}|H_{mn}(\mathbf{R})|$"
+#     else:
+#         raise ValueError("component must be one of {'abs','real','imag'}.")
 
-    # Build cell polygons: each cell is a parallelogram with corners
-    # (i,j), (i+1,j), (i+1,j+1), (i,j+1)
-    polys = []
-    vals = []
-    for i in range(Nkx - 1):
-        for j in range(Nky - 1):
-            p00 = Rxy[i, j]
-            p10 = Rxy[i + 1, j]
-            p11 = Rxy[i + 1, j + 1]
-            p01 = Rxy[i, j + 1]
-            polys.append([p00, p10, p11, p01])
-            # cell value: average of the four corners
-            vals.append(0.25 * (Z[i, j] + Z[i + 1, j] + Z[i + 1, j + 1] + Z[i, j + 1]))
+#     # Build cell polygons: each cell is a parallelogram with corners
+#     # (i,j), (i+1,j), (i+1,j+1), (i,j+1)
+#     polys = []
+#     vals = []
+#     for i in range(Nkx - 1):
+#         for j in range(Nky - 1):
+#             p00 = Rxy[i, j]
+#             p10 = Rxy[i + 1, j]
+#             p11 = Rxy[i + 1, j + 1]
+#             p01 = Rxy[i, j + 1]
+#             polys.append([p00, p10, p11, p01])
+#             # cell value: average of the four corners
+#             vals.append(0.25 * (Z[i, j] + Z[i + 1, j] + Z[i + 1, j + 1] + Z[i, j + 1]))
 
-    vals = np.asarray(vals)
+#     vals = np.asarray(vals)
 
-    if vmin is None:
-        vmin = float(np.min(vals))
-    if vmax is None:
-        vmax = float(np.max(vals))
+#     if vmin is None:
+#         vmin = float(np.min(vals))
+#     if vmax is None:
+#         vmax = float(np.max(vals))
 
-    fig, ax = plt.subplots(figsize=figsize)
-    pcm = ax.pcolormesh(
-            Rx,
-            Ry,
-            Z,
-            shading="auto",
-            cmap=cmap,
-        )
+#     fig, ax = plt.subplots(figsize=figsize)
+#     pcm = ax.pcolormesh(
+#             Rx,
+#             Ry,
+#             Z,
+#             shading="auto",
+#             cmap=cmap,
+#         )
 
-    # coll = PolyCollection(polys, array=vals, cmap=cmap, edgecolors="none")
-    # coll.set_clim(vmin, vmax)
-    # ax.add_collection(coll)
+#     # coll = PolyCollection(polys, array=vals, cmap=cmap, edgecolors="none")
+#     # coll.set_clim(vmin, vmax)
+#     # ax.add_collection(coll)
 
-    # Autoscale to polygon extents
-    # all_pts = np.vstack([np.asarray(p) for p in polys])
-    # ax.set_xlim(all_pts[:, 0].min(), all_pts[:, 0].max())
-    # ax.set_ylim(all_pts[:, 1].min(), all_pts[:, 1].max())
-    ax.set_aspect("equal", adjustable="box")
-    ax.set_xlabel(r"$R_x$")
-    ax.set_ylabel(r"$R_y$")
+#     # Autoscale to polygon extents
+#     # all_pts = np.vstack([np.asarray(p) for p in polys])
+#     # ax.set_xlim(all_pts[:, 0].min(), all_pts[:, 0].max())
+#     # ax.set_ylim(all_pts[:, 1].min(), all_pts[:, 1].max())
+#     ax.set_aspect("equal", adjustable="box")
+#     ax.set_xlabel(r"$R_x$")
+#     ax.set_ylabel(r"$R_y$")
 
-    # if title is None:
-    #     title = rf"{clabel} for (m,n)=({m},{n})"
-    # ax.set_title(title)
+#     # if title is None:
+#     #     title = rf"{clabel} for (m,n)=({m},{n})"
+#     # ax.set_title(title)
 
-    cbar = fig.colorbar(pcm, ax=ax, pad=0.02, shrink=0.9)
-    cbar.set_label(clabel)
+#     cbar = fig.colorbar(pcm, ax=ax, pad=0.02, shrink=0.9)
+#     cbar.set_label(clabel)
 
-    # if show_unitcell and Nkx >= 2 and Nky >= 2:
-    #     # Draw cell at origin-ish: use step vectors from grid
-    #     # (these are the real-space lattice steps)
-    #     a1 = Rxy[1, 0] - Rxy[0, 0]
-    #     a2 = Rxy[0, 1] - Rxy[0, 0]
-    #     origin = np.array([0.0, 0.0])
-    #     uc = np.array([origin, origin + a1, origin + a1 + a2, origin + a2, origin])
-    #     ax.plot(uc[:, 0], uc[:, 1], "k-", lw=1.2)
+#     # if show_unitcell and Nkx >= 2 and Nky >= 2:
+#     #     # Draw cell at origin-ish: use step vectors from grid
+#     #     # (these are the real-space lattice steps)
+#     #     a1 = Rxy[1, 0] - Rxy[0, 0]
+#     #     a2 = Rxy[0, 1] - Rxy[0, 0]
+#     #     origin = np.array([0.0, 0.0])
+#     #     uc = np.array([origin, origin + a1, origin + a1 + a2, origin + a2, origin])
+#     #     ax.plot(uc[:, 0], uc[:, 1], "k-", lw=1.2)
 
-    fig.tight_layout()
-    if savepath is not None:
-        fig.savefig(savepath, dpi=200)
-    return fig, ax
+#     fig.tight_layout()
+#     if savepath is not None:
+#         fig.savefig(savepath, dpi=200)
+#     return fig, ax

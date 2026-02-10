@@ -17,16 +17,17 @@ from __future__ import annotations
 from pathlib import Path
 import subprocess 
 import shutil
-import os
 from typing import List, Tuple, Optional
 from .lattice import MoireLattice
 from .bm import BMModel
 from .config import WannierizationRecipe
-from .solver import get_eigensystem_cached, module_name_from_model
+from .solver import get_eigensystem_cached, module_name_from_model, select_neutrality_bands
 from .trials import TrialBuilder
-from .symmetry import SymmetryGroup,build_D_band_from_group, build_D_wann_from_group, build_D_wann_generators_from_EBRs, build_dmn_maps_trivial_irr
+from .symmetry import SymmetryGroup,build_D_band_from_group, build_D_wann_from_group, build_D_wann_generators_from_EBRs, \
+    build_dmn_maps_trivial_irr, group_23, group_TR, symmetrize_u_matrix, symmetrize_with_P
 import numpy as np
 import re
+from tbg_wannier.plotting import plot_real_space_wanniers
 
 
 def ensure_wan90_workdir(
@@ -475,6 +476,58 @@ def write_mmn(seedname: str | Path, M: np.ndarray, num_kpts: int, nn_list: np.nd
                     f.write(f"{val.real:18.12f} {val.imag:18.12f}\n")
 
 
+def write_mmn_stream(
+    seedname: str | Path,
+    lat: MoireLattice,
+    eigvecs: np.ndarray,
+    num_kpts: int,
+    nn_list: np.ndarray,
+) -> None:
+    """Stream-write seedname.mmn without constructing the full M array.
+
+    This computes each neighbor overlap record on-the-fly and writes it
+    directly to disk, keeping peak memory usage low.
+    """
+    seedname = Path(seedname)
+    filename = seedname.parent / f"{seedname.stem}.mmn"
+    filename.parent.mkdir(parents=True, exist_ok=True)
+
+    nn_list = np.asarray(nn_list, int)
+    num_bands = eigvecs.shape[2]
+    nntot = nn_list.shape[0] // num_kpts if num_kpts > 0 else nn_list.shape[0]
+
+    with open(filename, "w") as f:
+        f.write("created by python\n")
+        f.write(f"{num_bands:6d} {num_kpts:6d} {nntot:6d}\n")
+        # Process each neighbor record sequentially to avoid large temporaries
+        for idx, (ik, ikb, g1, g2, g3) in enumerate(nn_list):
+            f.write(f"{ik:5d} {ikb:5d} {g1:5d} {g2:5d} {g3:5d}\n")
+
+            # Fetch eigenvector blocks (small views, no copy)
+            V1 = eigvecs[int(ik) - 1]   # shape (dim, nbands)
+            V2 = eigvecs[int(ikb) - 1]  # shape (dim, nbands)
+
+            # Build embedding matrix for this neighbor (dim x dim)
+            R = lat.embedding_matrix((int(g1), int(g2)))
+
+            # tmp = R @ V2  -> shape (dim, nbands)
+            tmp = R @ V2
+
+            # M = V1.conj().T @ tmp -> shape (nbands, nbands)
+            Mrec = np.conjugate(V1).T @ tmp
+
+            # Write values in Wannier90 order: n outer, m inner
+            for n in range(num_bands):
+                for m in range(num_bands):
+                    val = Mrec[m, n]
+                    f.write(f"{val.real:18.12f} {val.imag:18.12f}\n")
+
+            # Release temporary references for GC
+            del Mrec
+            del tmp
+            del R
+
+
 def _read_u_mat_int(filename: str) -> Tuple[np.ndarray, np.ndarray]:
     """
     Read Wannier90 seedname_u.mat.
@@ -550,7 +603,8 @@ def read_u_mat(seedname: str | Path, disentanglement: bool = False) -> Tuple[np.
         U_dist, kpts_dis = _read_u_mat_int(str(filename_dis))
         if not np.allclose(kpts, kpts_dis):
             raise ValueError("k mesh for U_dist and U does not match")
-        U_out = np.array([U_dist[i] @ U[i] for i in range(num_kpts)])
+        # U_out = np.array([U_dist[i] @ U[i] for i in range(num_kpts)])
+        U_out = U_dist @ U
     return U_out, kpts
 
 def write_u_mat(
@@ -823,13 +877,11 @@ def write_dmn(
                 f.write("\n")
 
 def make_wanniers_from_U(U: np.ndarray, eigvecs: np.ndarray) -> np.ndarray:
-    numk = eigvecs.shape[0]
-    wan = np.array([eigvecs[i] @ U[i] for i in range(numk)])
+    wan = eigvecs @ U
     return wan
 
 def make_U_from_wanniers(wan: np.ndarray, eigvecs: np.ndarray) -> np.ndarray:
-    numk = eigvecs.shape[0]
-    U = np.array([eigvecs[i].T.conj() @ wan[i] for i in range(numk)])
+    U = eigvecs.conj().swapaxes(1, 2) @ wan
     return U
 
 def write_w90_files(
@@ -913,26 +965,39 @@ def write_w90_files(
 
     # 2) Load or compute eigensystem
     if read_from_cache:
-        _, eigvals, eigvecs, cache_path = get_eigensystem_cached(model, cache_dir="cache")
+        _, eigvals, eigvecs, cache_path, _ = get_eigensystem_cached(model, cache_dir="cache")
         print(f"Loaded eigensystem from cache: {cache_path}")
     elif eigvecs is None:
         raise ValueError("If not read from cache, eigenvectors must be provided.")
     
     num_bands = eigvecs.shape[-1]
     num_wann = recipe.num_wann
-    
-    # 3) Generate and write .win file (Python-generated, no template)
     win_path = work_dir / f"{seedname}.win"
-    write_win(
-        win_path,
-        num_wann=num_wann,
-        num_bands=num_bands,
-        N_k=lat.N_k,
-        disentangle=disentangle,
-        sym_adapted=sym_adapted,
-    )
-    print(f"Generated .win file: {win_path}")
-    
+    if disentangle:
+        e_gamma3 = np.sort(np.abs(eigvals[0]))[3]
+        # 3) Generate and write .win file (Python-generated, no template)
+        
+        write_win(
+            win_path,
+            num_wann=num_wann,
+            num_bands=num_bands,
+            N_k=lat.N_k,
+            disentangle=disentangle,
+            sym_adapted=sym_adapted,
+            dis_win_max = 1.2 * e_gamma3,
+            dis_win_min = -1.2 * e_gamma3,
+        )
+        print(f"Generated .win file: {win_path}")
+    else:
+        write_win(
+            win_path,
+            num_wann=num_wann,
+            num_bands=num_bands,
+            N_k=lat.N_k,
+            disentangle=disentangle,
+            sym_adapted=sym_adapted,
+        )
+        print(f"Generated .win file: {win_path}")        
     # 4) Write .eig (eigenvalues)
     if do_write_eig:
         if eigvals is None:
@@ -974,9 +1039,9 @@ def write_w90_files(
     if nn_list is None:
         raise RuntimeError(f"No nn_list found in {nnkp_path}")
     
-    M = build_mmn_from_nnkp(lat, eigvecs, nn_list)
-    write_mmn(seed, M, num_kpts=len(k_mesh), nn_list=nn_list)
-    print(f"Wrote overlaps: {seed}.mmn")
+    # Write .mmn by streaming computation to avoid large memory allocations
+    write_mmn_stream(seed, lat, eigvecs, num_kpts=len(k_mesh), nn_list=nn_list)
+    print(f"Wrote overlaps: {seed}.mmn (streamed)")
     
     # 8) Optional: Write .dmn (symmetry-adapted Wannierization)
     if sym_adapted:
@@ -1035,3 +1100,157 @@ def write_w90_files(
     print(f"U-matrix: {u_mat_path}")
     return work_dir
 
+def run_workflow_for_angle(
+    model: BMModel,
+    recipe_zhida: WannierizationRecipe,
+    recipe_8b: WannierizationRecipe,
+    seed: str = "bm",
+    wan90_root: str = "wan90",
+    cache_dir: str = "cache",
+    verbose: bool = True,
+    plotting: bool = False,
+) -> dict:
+    """
+    Run complete Wannier90 workflow for a single twist angle.
+    
+    Returns:
+        Dict with keys:
+            - 'theta': twist angle
+            - 'eigvals': eigenvalues shape (n_k, n_bands)
+            - 'eigvecs': eigenvectors shape (n_k, dim, n_bands)
+            - 'Hk': momentum-space Wannier Hamiltonian shape (n_k, n_wann, n_wann)
+            - 'HR': real-space hopping matrix dict {R_tuple: H(R)}
+            - 'R_cart': Cartesian coordinates of R vectors
+            - 'seed': model seed name
+    """
+
+    lat = model.lat
+    theta_deg = model.params.theta_deg
+    if verbose:
+        print(f"\n{'='*70}")
+        print(f"Running workflow for θ = {theta_deg:.2f}°")
+        print(f"{'='*70}")
+    
+    # Solve eigenvalue problem
+    try:
+        _, eigvals, eigvecs, cache_path, _ = get_eigensystem_cached(
+            model, cache_dir=cache_dir, force_recompute=False
+        )
+        if verbose:
+            print(f"✓ Eigenvalue solve complete (loaded from cache or freshly computed)")
+    except Exception as e:
+        print(f"✗ Error solving eigenvalue problem: {e}")
+        return None
+    
+    # Generate Wannier90 files
+    try:
+        work_dir = write_w90_files(
+            model,
+            recipe_zhida,
+            seedname=f"{seed}_zhida",
+            wan90_root=wan90_root,
+            read_from_cache=True,
+            do_write_eig=True,
+            disentangle=True,
+            no_trials=False,
+        )
+        if verbose:
+            print(f"✓ Wannier90 files written to {work_dir}")
+    except Exception as e:
+        print(f"✗ Error writing Wannier90 files for THF: {e}")
+        return None
+    
+    # Read optimized U-matrix
+    try:
+        u_mat_path = work_dir / f"{seed}_zhida_u.mat"
+        U, _ = read_u_mat(u_mat_path, disentanglement=True)
+        if verbose:
+            print(f"✓ Read U-matrix from {u_mat_path}")
+    except Exception as e:
+        print(f"✗ Error reading U-matrix: {e}")
+        return None
+    
+    # Apply symmetries to heavy fermions
+    try:
+        U_sym = symmetrize_u_matrix(U, group=group_23, lat=lat, eigvecs=eigvecs, recipe=recipe_zhida)
+        U_sym = symmetrize_with_P(U_sym, eigvecs=eigvecs, lat=lat)
+        U_sym = symmetrize_u_matrix(U_sym, group=group_TR, lat=lat, eigvecs=eigvecs, recipe=recipe_zhida)
+        if verbose:
+            print(f"✓ Applied symmetry constraints")
+    except Exception as e:
+        print(f"⚠ Warning: symmetry application encountered: {e}")
+        return None
+    
+    # Construct 8-band orthocomplement basis
+    try:
+        w_zhida = make_wanniers_from_U(U_sym, eigvecs)
+        eig10b, vec10b = select_neutrality_bands(eigvals, eigvecs, n=10)
+        M = vec10b.swapaxes(1,2).conjugate() @ w_zhida
+        U, _, _ = np.linalg.svd(M)
+        psi_orthocomp = vec10b @ U[..., 2:]
+    except Exception as e:
+        print(f"✗ Error constructing orthocomplement basis: {e}")
+        return None
+
+    Nk, _, nband = psi_orthocomp.shape
+    iden = np.repeat(np.eye(nband)[None, :, :], Nk, axis=0)
+    check = psi_orthocomp.conj().swapaxes(1,2) @ psi_orthocomp
+    if not np.allclose(iden, psi_orthocomp.conj().swapaxes(1,2) @ psi_orthocomp):
+        print("Warning, projected Bloch function not orthormal")
+        print(np.max(np.abs(iden - check)))
+
+    # Wannierize remaining 8 bands
+    try:
+        work_dir_8b = write_w90_files(
+            model,
+            recipe_8b,
+            seedname=f"{seed}_8b",
+            wan90_root=wan90_root,
+            read_from_cache=False,  # Load eigensystem from cache
+            eigvecs=psi_orthocomp,
+            do_write_eig=False,
+            sym_adapted=True,
+            group=group_23,
+            no_trials=False,
+        )
+    except Exception as e:
+        print(f"✗ Error writing Wannier90 files for the remaining 8 bands: {e}")
+        return None
+    
+    # Write U-matrix for combined 10 bands
+    try:
+        u_mat_path_8b = work_dir_8b / f"{seed}_8b_u.mat"
+        U_w90_8b, k3 = read_u_mat(u_mat_path_8b)
+        U_8b_sym = symmetrize_u_matrix(U_w90_8b, group=group_TR, lat=lat, eigvecs=psi_orthocomp, recipe=recipe_8b, enforce_semiunitary=True)
+
+        w_8b = make_wanniers_from_U(U_8b_sym, psi_orthocomp)
+        wanniers = np.concatenate((w_zhida, w_8b), axis=-1)
+        U_res = make_U_from_wanniers(wanniers, vec10b)
+        u_mat_path_10b = work_dir / f"{seed}_10b_u.mat"
+        write_eig(work_dir / f"{seed}_10b.eig", eig10b)
+        write_u_mat(u_mat_path_10b, U_res, k3)
+    except Exception as e:
+        print(f"✗ Error constructing combined 10-band U-matrix: {e}")
+        return None
+    
+    # Plotting real_space wanniers (optional)
+    if plotting == True:
+        plot_path = work_dir / f"wannier_{seed}_10b"
+        try:
+            plot_real_space_wanniers(
+                lat, wanniers, beta_idx=1, layer=1,
+                savepath=plot_path, ncols=5, cmap="inferno"
+            )
+            if verbose:
+                print(f"✓ Saved real-space Wannier plots to {plot_path}")
+        except Exception as e:
+            print(f"⚠ Warning: plotting failed: {e}")      
+    result = {
+        'theta': theta_deg,
+        'seed': seed,
+        'work_dir': work_dir,
+    }
+    
+    print(f"✓ Workflow complete for θ = {theta_deg:.2f}°")
+    
+    return result

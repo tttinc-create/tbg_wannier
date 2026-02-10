@@ -24,7 +24,7 @@ from .wannier90 import (write_win, write_win_from_template, generate_win_content
                         read_eig, write_eig, read_u_mat, write_u_mat, parse_nnkp,
                         write_amn, write_mmn, write_dmn, build_amn_from_trials, 
                         build_mmn_from_nnkp, make_U_from_wanniers, make_wanniers_from_U, 
-                        write_w90_files)
+                        write_w90_files, run_workflow_for_angle)
 
 __all__ = [
     "BMParameters", "SolverParameters", "WannierizationRecipe",
@@ -37,6 +37,6 @@ __all__ = [
     "read_eig", "write_eig", "read_u_mat", "write_u_mat", "parse_nnkp",
     "write_amn", "write_mmn", "write_dmn", 
     "build_amn_from_trials", "build_mmn_from_nnkp", "make_U_from_wanniers", "make_wanniers_from_U",
-    "write_w90_files",
+    "write_w90_files", "run_workflow_for_angle",
 ]
 

@@ -250,6 +250,9 @@ def save_eigensystem(
     eigvals: np.ndarray,
     eigvecs: np.ndarray,
     meta: Optional[dict] = None,
+    ref_basis: Optional[np.ndarray] = None,
+    compress_with_reference: bool = False,
+    ortho_tol: float = 1e-8,
 ) -> None:
     """Save eigensystem to a compressed .npz with metadata.
 
@@ -265,8 +268,41 @@ def save_eigensystem(
     meta = {} if meta is None else dict(meta)
     meta["model_snapshot"] = model_snapshot(model)
     meta.setdefault("k_mesh_hash", _hash_array(np.asarray(model.lat.k_cart, float)))
-    meta_json = json.dumps(meta, sort_keys=True)
+    meta["compressed_with_reference"] = compress_with_reference  # default, may be overridden below
 
+    if compress_with_reference:
+        if ref_basis is None:
+            raise ValueError("compress_with_reference=True requires a ref_basis to be provided.")
+        if ref_basis.shape != eigvecs.shape:
+            raise ValueError("ref_basis must have the same shape as eigvecs (Nk,dim,nb).")
+
+        # check orthonormality: R^H R == I
+        R = ref_basis
+        nb = eigvecs.shape[2]
+        RHR = R.conj().swapaxes(1, 2) @ R
+        I = np.broadcast_to(np.eye(nb), RHR.shape)
+        if not np.allclose(RHR, I, atol=ortho_tol):
+            raise ValueError("Provided ref_basis is not orthonormal within ortho_tol.")
+
+        # overlaps: (Nk, nb, nb) = eigvecs.conj().swapaxes(1,2) @ ref_basis
+        overlaps = ref_basis.conj().swapaxes(1, 2) @ eigvecs
+        meta["compressed_with_reference"] = True
+        try:
+            meta["ref_hash"] = _hash_array(np.asarray(ref_basis, float))
+        except Exception:
+            pass
+        meta_json = json.dumps(meta, sort_keys=True)
+
+        np.savez_compressed(
+            path,
+            eigvals=np.asarray(eigvals, float),
+            evecs_overlap=np.asarray(overlaps, complex),
+            meta_json=np.array(meta_json),
+        )
+        return
+
+    # default full-storage path
+    meta_json = json.dumps(meta, sort_keys=True)
     np.savez_compressed(
         path,
         eigvals=np.asarray(eigvals, float),
@@ -278,26 +314,70 @@ def save_eigensystem(
 def load_eigensystem(
     path: str | os.PathLike,
     *,
-    atol: float = 0.0,
+    ref_basis: Optional[np.ndarray] = None,
+    output_overlaps: bool = False,
+    # ortho_tol: float = 1e-8,
+    # atol: float = 0.0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
     """Load eigensystem from a .npz.
 
-    If `require_k_mesh` is provided, checks it matches (within atol).
-    Returns (k_mesh, eigvals, eigvecs, meta_dict).
+    If the file contains a compressed overlap matrix (saved with
+    `save_eigensystem(..., compress_with_reference=True)`), then a
+    `ref_basis` must be provided to reconstruct the eigenvectors.
+
+    Returns (model, eigvals, eigvecs, meta_dict).
     """
     path = Path(path)
     data = np.load(path, allow_pickle=False)
 
     eigvals = np.asarray(data["eigvals"], float)
-    eigvecs = np.asarray(data["eigvecs"], complex)
 
     meta_json = str(data["meta_json"])
     meta = json.loads(meta_json) if meta_json else {}
     snap = meta.get("model_snapshot", None)
     if snap is None:
         raise ValueError("Cache file does not contain a model_snapshot.")
+    compress_with_reference = meta.get("compressed_with_reference", False)
     model = model_from_snapshot(snap)
-    return model, eigvals, eigvecs, meta
+
+    # either full eigenvectors or compressed overlaps may be stored
+    if "eigvecs" in data:
+        eigvecs = np.asarray(data["eigvecs"], complex)
+        return model, eigvals, eigvecs, meta
+
+    if compress_with_reference:
+        if ref_basis is None:
+            raise ValueError(
+                "Cache contains compressed eigvec overlaps; provide `ref_basis` to reconstruct eigvecs."
+            )
+        overlaps = np.asarray(data["evecs_overlap"], complex)
+
+        # shapes: overlaps (Nk, nb, nb), ref_basis (Nk, dim, nb)
+        Nk = eigvals.shape[0]
+        if overlaps.ndim != 3:
+            raise ValueError("Invalid overlap array shape in cache.")
+        if ref_basis.shape != (Nk, int(model.lat.siteN * 4 if not model.params.two_valleys else model.lat.siteN * 8), overlaps.shape[2]):
+            # fallback: allow matching (Nk, dim, nb) by using model.dim if available
+            expected_dim = model.lat.siteN * (4 if not model.params.two_valleys else 8)
+            if ref_basis.shape != (Nk, expected_dim, overlaps.shape[2]):
+                raise ValueError("Provided ref_basis has incorrect shape compared to cached overlaps.")
+        if output_overlaps:
+            return model, eigvals, overlaps, meta
+        # check orthonormality of reference basis columns per k
+        # ref_basis: (Nk, dim, nb) -> R^H R should be identity (nb, nb)
+        # R = ref_basis
+        # nb = overlaps.shape[1]
+        # # compute R^H R: (Nk, nb, nb)
+        # RHR = np.einsum("kdi,kdj->kij", R.conj().swapaxes(1, 2), R)
+        # I = np.broadcast_to(np.eye(nb), RHR.shape)
+        # if not np.allclose(RHR, I, atol=ortho_tol):
+        #     raise ValueError("Provided ref_basis is not orthonormal within ortho_tol.")
+
+        # reconstruct eigvecs: U_k = R_k @ overlaps_k.conj().T
+        eigvecs = ref_basis @ overlaps
+        return model, eigvals, eigvecs, meta
+
+    raise ValueError("Cache file missing eigenvector data (neither 'eigvecs' nor 'evecs_overlap' present).")
 
 
 def get_eigensystem_cached(
@@ -305,7 +385,9 @@ def get_eigensystem_cached(
     *,
     cache_dir: str | os.PathLike = "cache",
     force_recompute: bool = False,
-    require_match: bool = True,
+    ref_basis: Optional[np.ndarray] = None,
+    compress_with_reference: bool = False,
+    output_overlaps: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, Path, dict]:
     """Load eigensystem from cache or compute + store it.
 
@@ -317,6 +399,8 @@ def get_eigensystem_cached(
     -----
     - `require_match=True` enforces that cached k_mesh equals provided k_mesh.
     - Filename includes a short hash of the k_mesh to prevent accidental collisions.
+    - If `compress_with_reference=True` the provided `ref_basis` will be used
+      when saving the newly computed eigensystem.
     """
     k_mesh = model.lat.k_cart
     path = default_eigensystem_cache_path(
@@ -325,13 +409,22 @@ def get_eigensystem_cached(
 
     if (not force_recompute) and path.exists():
         print("Cache file found, loading")
-        model, ev, eV, meta = load_eigensystem(path)
-        return model, ev, eV, path
+        model, ev, eV, meta = load_eigensystem(path, ref_basis=ref_basis, output_overlaps=output_overlaps)
+        return model, ev, eV, path, meta
 
     # compute
     print("Cache file not found, computing")
     eigvals, eigvecs = solve_kpoints(model)
     print("Done with computing")
     # metadata (store params snapshot + basic shapes)
-    save_eigensystem(path, model=model, eigvals=eigvals, eigvecs=eigvecs)
-    return model, eigvals, eigvecs, path
+    save_eigensystem(
+        path,
+        model=model,
+        eigvals=eigvals,
+        eigvecs=eigvecs,
+        ref_basis=ref_basis,
+        compress_with_reference=compress_with_reference,
+    )
+    # return meta as well (loaded from saved file to reflect exact storage)
+    model2, ev2, eV2, meta = load_eigensystem(path, ref_basis=ref_basis, output_overlaps=output_overlaps)
+    return model2, ev2, eV2, path, meta

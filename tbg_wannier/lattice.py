@@ -123,6 +123,10 @@ class MoireLattice:
     def cart_coords(self, k_frac: np.ndarray) -> np.ndarray:
         """Convert fractional coordinates to cartesian."""
         return k_frac[0] * self.b1 + k_frac[1] * self.b2
+    
+    def cart_real_coords(self, r_frac: np.ndarray) -> np.ndarray:
+        """Convert real-space fractional coordinates to cartesian."""
+        return r_frac[0] * self.a1 + r_frac[1] * self.a2
 
     def wrap_mn(self, m: int, n: int) -> Tuple[int, int]:
         """
