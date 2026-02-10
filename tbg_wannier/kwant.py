@@ -1,0 +1,267 @@
+"""
+Simulation of Disordered Twist-Angle Domains in TBG using Kwant.
+
+This script stitches together domains with different twist angles by using
+Fourier interpolation of the Wannier Hamiltonian. It handles the lattice
+mismatch by treating site positions in continuous real space and filtering
+hoppings based on the physical separation of Wannier centers.
+
+Key Components:
+1. InterpolatedHamiltonian: Manages upsampling and creates a lookup table
+   for efficient retrieval of H(d) for arbitrary distance vectors d.
+2. ScaledLattice: Helper to handle physical unit conversion (nm) from model params.
+3. make_disordered_system: Builds the Kwant system with domain logic.
+"""
+
+import numpy as np
+import kwant
+import tinyarray as ta
+from scipy.spatial import cKDTree
+
+from .interpolation import ModelManager
+from .domains import DomainDef
+# --- Helper Class for Scaled Lattice ---
+# --- Kwant System Construction ---
+
+def find_valid_start(lat, shape_func, seed, search_n=10):
+    """
+    Robustly finds a valid lattice site inside the shape near the seed.
+    This fixes 'No sites close to...' errors when seed is near boundary.
+    """
+    # 1. Try the closest lattice point to the geometric seed
+    closest_pos = lat.n_closest(seed, search_n)
+    attempts = 0
+    for pos in closest_pos:
+        attempts += 1
+        if shape_func(pos):
+            print(f"  - Found valid seed in {attempts} attempts.")
+            return pos
+    print("    - Warning: Could not find valid site near seed.")
+    return seed
+
+def attach_square_leads(syst: kwant.Builder, width: float, height: float,
+                        lead_a: float = 10.0, lead_t: float = 100.0,
+                        coupling_t: float = 50.0, cutoff_nm: float = 15.0):
+    """
+    Attaches square lattice leads to the top and bottom of the system.
+    Handles lattice mismatch by adding a 'connector' buffer region.
+    
+    Args:
+        syst: The populated finite system builder.
+        width: Width of the scattering region.
+        height: Height of the scattering region.
+        lead_a: Lattice constant of the square lead (nm).
+        lead_t: Hopping parameter for the lead (meV).
+        coupling_t: Tunneling hopping between TBG and Lead (meV).
+        cutoff_nm: Distance cutoff for coupling hoppings.
+    """
+    print("\n--- Attaching Square Leads ---")
+    
+    # 1. Define Lead Lattice (Square, 10 orbitals to match TBG dimensionality)
+    lat_lead = kwant.lattice.square(a=lead_a, norbs=10, name='Lead')
+    
+    # Lead Hamiltonian (Diagonal hopping for simple metal)
+    lead_onsite = ta.array(np.zeros((10, 10)))
+    lead_hopping = ta.array(-lead_t * np.eye(10))
+    
+    # 2. Add "Connector" Sites to the Finite System
+    # We add a strip of square lattice sites just overlapping the domain edges
+    # Thickness of buffer
+    buff = 2.0 * lead_a 
+    
+    def shape_top(pos):
+        x, y = pos
+        return (-width/2 <= x <= width/2) and (height/2 <= y <= height/2 + buff)
+
+    def shape_bot(pos):
+        x, y = pos
+        return (-width/2 <= x <= width/2) and (-height/2 - buff<= y <= -height/2)
+    
+    # Add buffer sites
+    syst[lat_lead.shape(shape_top, (0, height/2 + 0.5*buff))] = lead_onsite
+    syst[lat_lead.shape(shape_bot, (0, -height/2 - 0.5*buff))] = lead_onsite
+    
+    # Add internal lead hoppings within the buffer
+    syst[lat_lead.neighbors()] = lead_hopping
+    
+    print("  > Lead buffer sites added.")
+
+    # 3. Create Couplings (Tunneling)
+    # We need to connect the new 'Lead' sites to the existing 'TBG' sites
+    # Use KDTree for efficient neighbor finding
+    
+    all_sites = list(syst.sites())
+    
+    # Separate by family
+    sites_lead = [s for s in all_sites if s.family == lat_lead]
+    sites_tbg = [s for s in all_sites if s.family != lat_lead]
+    
+    if not sites_lead or not sites_tbg:
+        print("  > Warning: Could not find sites for coupling.")
+        return
+
+    pos_lead = np.array([s.pos for s in sites_lead])
+    pos_tbg = np.array([s.pos for s in sites_tbg])
+    
+    tree_lead = cKDTree(pos_lead)
+    tree_tbg = cKDTree(pos_tbg)
+    
+    # Find neighbors within cutoff
+    print(f"  > Computing couplings (cutoff={cutoff_nm} nm)...")
+    results = tree_lead.query_ball_tree(tree_tbg, r=cutoff_nm)
+    
+    # Coupling Matrix (Simple scalar tunneling * Identity)
+    mat_coupling = ta.array(coupling_t * np.eye(10))
+    
+    count = 0
+    for i_lead, neighbors in enumerate(results):
+        site_lead = sites_lead[i_lead]
+        for i_tbg in neighbors:
+            site_tbg = sites_tbg[i_tbg]
+            
+            # Distance check (redundant but safe)
+            d = np.linalg.norm(site_lead.pos - site_tbg.pos)
+            if d < cutoff_nm:
+                # Add hermitian hopping
+                syst[site_lead, site_tbg] = mat_coupling
+                count += 1
+                
+    print(f"  > Added {count} coupling hoppings.")
+
+    # 4. Construct and Attach Infinite Leads
+    # Top Lead (Translational Symmetry +y)
+    sym_top = kwant.TranslationalSymmetry((0, lead_a))
+    lead_top = kwant.Builder(sym_top)
+    
+    def lead_shape(pos):
+        x, y = pos
+        return -width/2 <= x <= width/2
+
+    lead_top[lat_lead.shape(lead_shape, (0, 0))] = lead_onsite
+    lead_top[lat_lead.neighbors()] = lead_hopping
+    
+    # Bottom Lead (Translational Symmetry -y)
+    sym_bot = kwant.TranslationalSymmetry((0, -lead_a))
+    lead_bot = kwant.Builder(sym_bot)
+    lead_bot[lat_lead.shape(lead_shape, (0, 0))] = lead_onsite
+    lead_bot[lat_lead.neighbors()] = lead_hopping
+    
+    # Attach
+    syst.attach_lead(lead_top)
+    syst.attach_lead(lead_bot)
+    print("  > Leads attached successfully.")
+
+
+def build_system(domains: list[DomainDef], trial_wann=None, cutoff_Ang=400.0) -> kwant.Builder:
+    """
+    Generic builder for N-domain systems.
+    """
+    print(f"\n=== Building System with {len(domains)} Domains ===")
+    
+    manager = ModelManager(trial_wann, cutoff_Ang)
+    syst = kwant.Builder()
+    norbs = 10  # Assuming 10 orbitals from the Wannier model
+    # Store domain info for interface loop
+    # structure: { domain_index: { 'sites': [], 'lattice': ... } }
+    domain_data = {}
+    
+    # --- 1. Create Sites & Bulk Hoppings ---
+    for i, dom in enumerate(domains):
+        print(f"Processing Domain {i}: {dom.name} (Theta={dom.theta}°)")
+        
+        # Get Model (upscale=1 for bulk lattice)
+        model = manager.get_model(dom.theta, upscale=1)
+        
+        # Create Lattice
+        lat = kwant.lattice.general([model.a1, model.a2], norbs=norbs, name=f"L_{dom.name}")
+        # Define Shape
+        # We use the seed point to help kwant if needed, but shape_func is primary
+        
+        # Populate sites
+        # We start flood fill from seed, or just use shape
+        # For disconnected domains, straightforward shape usage is safer than flood fill
+        valid_seed = find_valid_start(lat, dom.shape_func, dom.seed_point)  # Just to check if seed is valid
+        syst[lat.shape(dom.shape_func, valid_seed)] = model.HR_fine[tuple(model.center_idx)]
+        
+        # Add Bulk Hoppings (Internal)
+        for dx, dy, mat in model.get_lattice_hopping():
+            syst[kwant.builder.HoppingKind((dx, dy), lat, lat)] = mat
+            
+        # Store sites for interface step
+        sites = [s for s in syst.sites() if s.family == lat]
+        print(f"  > Sites created: {len(sites)}")
+        
+        domain_data[i] = {
+            'sites': sites,
+            'lattice': lat,
+            'theta': dom.theta
+        }
+
+    # --- 2. Compute Interfaces (Vectorized) ---
+    print("\nComputing Interfaces...")
+    
+    # Iterate over unique pairs of domains
+    for i in range(len(domains)):
+        for j in range(i + 1, len(domains)):
+            
+            sites_i = domain_data[i]['sites']
+            sites_j = domain_data[j]['sites']
+            
+            if not sites_i or not sites_j: continue
+            
+            # Calculate Average Theta for Interface
+            theta_avg = (domain_data[i]['theta'] + domain_data[j]['theta']) / 2.0
+            
+            # Get Interface Model (High precision interpolation)
+            model_inter = manager.get_model(theta_avg, upscale=16)
+            
+            # KDTree Query
+            pos_i = np.array([s.pos for s in sites_i])
+            pos_j = np.array([s.pos for s in sites_j])
+            
+            tree_i = cKDTree(pos_i)
+            tree_j = cKDTree(pos_j)
+            
+            # Find pairs within cutoff (cutoff_Ang -> nm)
+            results = tree_i.query_ball_tree(tree_j, r=cutoff_Ang)
+            
+            # Collect all displacements to vectorize
+            # We need to map back which site pair corresponds to which displacement
+            pair_indices = [] # [(idx_in_i, idx_in_j), ...]
+            displacements = []
+            
+            count_pairs = 0
+            for idx_i, neighbors in enumerate(results):
+                if not neighbors: continue
+                p_i = pos_i[idx_i]
+                for idx_j in neighbors:
+                    p_j = pos_j[idx_j]
+                    d_vec = p_i - p_j
+                    
+                    displacements.append(d_vec)
+                    pair_indices.append((idx_i, idx_j))
+                    count_pairs += 1
+            
+            if count_pairs == 0:
+                continue
+
+            # Vectorized Lookup
+            displacements = np.array(displacements)
+            matrices, mask = model_inter.get_hoppings_vectorized(displacements)
+            
+            # Apply to System
+            added_hops = 0
+            for k, is_valid in enumerate(mask):
+                if is_valid:
+                    idx_i, idx_j = pair_indices[k]
+                    site_i = sites_i[idx_i]
+                    site_j = sites_j[idx_j]
+                    
+                    # syst[i, j] is hopping FROM j TO i
+                    syst[site_i, site_j] = ta.array(matrices[k])
+                    added_hops += 1
+                    
+            print(f"  > Interface {domains[i].name} <-> {domains[j].name}: {added_hops} hoppings")
+
+
+    return syst
