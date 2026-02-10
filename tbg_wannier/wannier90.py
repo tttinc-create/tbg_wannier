@@ -1109,6 +1109,7 @@ def run_workflow_for_angle(
     cache_dir: str = "cache",
     verbose: bool = True,
     plotting: bool = False,
+    wannier90_x_path: Optional[str | Path] = None,
 ) -> dict:
     """
     Run complete Wannier90 workflow for a single twist angle.
@@ -1130,7 +1131,8 @@ def run_workflow_for_angle(
         print(f"\n{'='*70}")
         print(f"Running workflow for θ = {theta_deg:.2f}°")
         print(f"{'='*70}")
-    
+    if wannier90_x_path is None:
+        raise ValueError("wannier90_x_path must be provided to run the workflow.")
     # Solve eigenvalue problem
     try:
         _, eigvals, eigvecs, cache_path, _ = get_eigensystem_cached(
@@ -1153,6 +1155,7 @@ def run_workflow_for_angle(
             do_write_eig=True,
             disentangle=True,
             no_trials=False,
+            wannier90_x_path=wannier90_x_path,
         )
         if verbose:
             print(f"✓ Wannier90 files written to {work_dir}")
