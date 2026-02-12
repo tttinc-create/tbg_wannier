@@ -316,7 +316,6 @@ def load_eigensystem(
     *,
     ref_basis: Optional[np.ndarray] = None,
     output_overlaps: bool = False,
-    # ortho_tol: float = 1e-8,
     # atol: float = 0.0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
     """Load eigensystem from a .npz.
@@ -388,6 +387,7 @@ def get_eigensystem_cached(
     ref_basis: Optional[np.ndarray] = None,
     compress_with_reference: bool = False,
     output_overlaps: bool = False,
+    verbose: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, Path, dict]:
     """Load eigensystem from cache or compute + store it.
 
@@ -408,7 +408,8 @@ def get_eigensystem_cached(
     )
 
     if (not force_recompute) and path.exists():
-        print("Cache file found, loading")
+        if verbose:
+            print("Cache file found, loading")
         model, ev, eV, meta = load_eigensystem(path, ref_basis=ref_basis, output_overlaps=output_overlaps)
         return model, ev, eV, path, meta
 

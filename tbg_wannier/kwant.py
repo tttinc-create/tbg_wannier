@@ -36,12 +36,13 @@ def find_valid_start(lat, shape_func, seed, search_n=10):
         if shape_func(pos):
             print(f"  - Found valid seed in {attempts} attempts.")
             return pos
-    print("    - Warning: Could not find valid site near seed.")
+    print(f"- Warning: Could not find valid site near seed in {attempts} attempts.")
     return seed
 
 def attach_square_leads(syst: kwant.Builder, width: float, height: float,
                         lead_a: float = 10.0, lead_t: float = 100.0,
-                        coupling_t: float = 50.0, cutoff: float = 15.0):
+                        coupling_t: float = 50.0, cutoff: float = 15.0,
+                        verbose: bool = False):
     """
     Attaches square lattice leads to the top and bottom of the system.
     Handles lattice mismatch by adding a 'connector' buffer region.
@@ -55,7 +56,8 @@ def attach_square_leads(syst: kwant.Builder, width: float, height: float,
         coupling_t: Tunneling hopping between TBG and Lead (meV).
         cutoff: Distance cutoff for coupling hoppings.(Angstrom)
     """
-    print("\n--- Attaching Square Leads ---")
+    if verbose:
+        print("\n--- Attaching Square Leads ---")
     
     # 1. Define Lead Lattice (Square, 10 orbitals to match TBG dimensionality)
     lat_lead = kwant.lattice.square(a=lead_a, norbs=10, name='Lead')
@@ -84,7 +86,8 @@ def attach_square_leads(syst: kwant.Builder, width: float, height: float,
     # Add internal lead hoppings within the buffer
     syst[lat_lead.neighbors()] = lead_hopping
     
-    print("  > Lead buffer sites added.")
+    if verbose:
+        print("  > Lead buffer sites added.")
 
     # 3. Create Couplings (Tunneling)
     # We need to connect the new 'Lead' sites to the existing 'TBG' sites
@@ -97,7 +100,8 @@ def attach_square_leads(syst: kwant.Builder, width: float, height: float,
     sites_tbg = [s for s in all_sites if s.family != lat_lead]
     
     if not sites_lead or not sites_tbg:
-        print("  > Warning: Could not find sites for coupling.")
+        if verbose:
+            print("  > Warning: Could not find sites for coupling.")
         return
 
     pos_lead = np.array([s.pos for s in sites_lead])
@@ -107,7 +111,8 @@ def attach_square_leads(syst: kwant.Builder, width: float, height: float,
     tree_tbg = cKDTree(pos_tbg)
     
     # Find neighbors within cutoff
-    print(f"  > Computing couplings (cutoff={cutoff} nm)...")
+    if verbose:
+        print(f"  > Computing couplings (cutoff={cutoff} nm)...")
     results = tree_lead.query_ball_tree(tree_tbg, r=cutoff)
     
     # Coupling Matrix (Simple scalar tunneling * Identity)
@@ -121,7 +126,8 @@ def attach_square_leads(syst: kwant.Builder, width: float, height: float,
             syst[site_lead, site_tbg] = mat_coupling
             count += 1
             
-    print(f"  > Added {count} coupling hoppings.")
+    if verbose:
+        print(f"  > Added {count} coupling hoppings.")
 
     # 4. Construct and Attach Infinite Leads
     # Top Lead (Translational Symmetry +y)
@@ -144,16 +150,30 @@ def attach_square_leads(syst: kwant.Builder, width: float, height: float,
     # Attach
     syst.attach_lead(lead_top)
     syst.attach_lead(lead_bot)
-    print("  > Leads attached successfully.")
+    if verbose:
+        print("  > Leads attached successfully.")
 
 
-def build_system(domains: list[DomainDef], trial_wann=None, cutoff_Ang=400.0) -> kwant.Builder:
+def build_system(domains: list[DomainDef], trial_wann: np.ndarray = None, cutoff_Ang: float = 400.0,
+                  verbose: bool =True, sample_thetas: list[float] = None) -> kwant.Builder:
     """
     Generic builder for N-domain systems.
     """
     print(f"\n=== Building System with {len(domains)} Domains ===")
     
     manager = ModelManager(trial_wann, cutoff_Ang)
+    # If a trial_wann is provided and no theta interpolator exists yet,
+    # build a default ThetaInterpolator using the domain angles.
+    # Interpolation grid: multiples of 0.01 degrees covering domain range.
+    if sample_thetas is None and len(domains) > 0:
+        thetas = np.array([d.theta for d in domains], dtype=float)
+        tmin = float(np.floor(thetas.min() * 100) / 100.0)
+        tmax = float(np.ceil(thetas.max() * 100) / 100.0)
+        # include endpoints, step 0.01
+        sample_thetas = np.round(np.arange(tmin, tmax + 1e-8, 0.01), 6)
+    if verbose:
+        print(f"  > Creating ThetaInterpolator with samples {sample_thetas[0]:.2f}..{sample_thetas[-1]:.2f} ({len(sample_thetas)} points)")
+    manager.create_theta_interpolator(sample_thetas, cache_dir="cache")
     syst = kwant.Builder()
     norbs = 10  # Assuming 10 orbitals from the Wannier model
     # Store domain info for interface loop
@@ -162,7 +182,8 @@ def build_system(domains: list[DomainDef], trial_wann=None, cutoff_Ang=400.0) ->
     
     # --- 1. Create Sites & Bulk Hoppings ---
     for i, dom in enumerate(domains):
-        print(f"Processing Domain {i}: {dom.name} (Theta={dom.theta}°)")
+        if verbose:
+            print(f"Processing Domain {i}: {dom.name} (Theta={dom.theta}°)")
         
         # Get Model (upscale=1 for bulk lattice)
         model = manager.get_model(dom.theta, upscale=1)
@@ -175,8 +196,8 @@ def build_system(domains: list[DomainDef], trial_wann=None, cutoff_Ang=400.0) ->
         # Populate sites
         # We start flood fill from seed, or just use shape
         # For disconnected domains, straightforward shape usage is safer than flood fill
-        valid_seed = find_valid_start(lat, dom.shape_func, dom.seed_point)  # Just to check if seed is valid
-        syst[lat.shape(dom.shape_func, valid_seed)] = model.HR_fine[tuple(model.center_idx)]
+        # valid_seed = find_valid_start(lat, dom.shape_func, dom.seed_point)  # Just to check if seed is valid
+        syst[lat.shape(dom.shape_func, dom.seed_point)] = model.HR_fine[tuple(model.center_idx)]
         
         # Add Bulk Hoppings (Internal)
         for dx, dy, mat in model.get_lattice_hopping():
@@ -184,7 +205,8 @@ def build_system(domains: list[DomainDef], trial_wann=None, cutoff_Ang=400.0) ->
             
         # Store sites for interface step
         sites = [s for s in syst.sites() if s.family == lat]
-        print(f"  > Sites created: {len(sites)}")
+        if verbose:
+            print(f"  > Sites created: {len(sites)}")
         
         domain_data[i] = {
             'sites': sites,
@@ -193,7 +215,8 @@ def build_system(domains: list[DomainDef], trial_wann=None, cutoff_Ang=400.0) ->
         }
 
     # --- 2. Compute Interfaces (Vectorized) ---
-    print("\nComputing Interfaces...")
+    if verbose:
+        print("\nComputing Interfaces...")
     
     # Iterate over unique pairs of domains
     for i in range(len(domains)):
@@ -256,7 +279,8 @@ def build_system(domains: list[DomainDef], trial_wann=None, cutoff_Ang=400.0) ->
                     syst[site_i, site_j] = ta.array(matrices[k])
                     added_hops += 1
                     
-            print(f"  > Interface {domains[i].name} <-> {domains[j].name}: {added_hops} hoppings")
+            if verbose:
+                print(f"  > Interface {domains[i].name} <-> {domains[j].name}: {added_hops} hoppings")
 
 
     return syst

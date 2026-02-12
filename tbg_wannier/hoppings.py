@@ -6,12 +6,15 @@ from .lattice import MoireLattice
 
 lst_s = [(0,0), (0,0), (0,0), (1/2, 0), (0, 1/2), (1/2, 1/2), (1/3, 2/3), (1/3, 2/3), (2/3, 1/3), (2/3, 1/3)]
 
+lat = MoireLattice.build(N_L=20, N_k=6)
+cart_real_coords = lat.cart_coords
+
 def filter_hopping_by_separation(
-    lat,
     HR: npt.NDArray[np.complex128],
     R_cart: npt.NDArray[np.float64],
     wannier_centers: list[tuple[float, float]] = lst_s,
-    cutoff: float = 4.75
+    cutoff: float = 4.75,
+    verbose: bool = False,
 ) -> tuple[npt.NDArray[np.complex128], npt.NDArray[np.bool_]]:
     """
     Filters hopping elements H_{mn}(R) where the distance between Wannier centers 
@@ -29,7 +32,7 @@ def filter_hopping_by_separation(
     wannier_centers : list of tuples
         Fractional coordinates of the Wannier centers within the unit cell.
     cutoff : float
-        Maximum allowed distance in nm.
+        Maximum allowed distance in units of 1/k_theta.
 
     Returns
     -------
@@ -41,7 +44,7 @@ def filter_hopping_by_separation(
     
     # 1. Prepare Wannier Centers in Cartesian Coordinates
     # Convert list of fractional coordinates to (Norb, 2) array
-    s_cart = np.asarray([lat.cart_real_coords(s) for s in wannier_centers], dtype=np.float64)
+    s_cart = np.asarray([cart_real_coords(s) for s in wannier_centers], dtype=np.float64)
 
     # 2. Reshape for Broadcasting
     # We want to compute: vec = R[i,j] + s_cart[m] - s_cart[n]
@@ -74,17 +77,19 @@ def filter_hopping_by_separation(
     # Optional: Print stats
     total_elements = keep_mask.size
     kept_elements = np.sum(keep_mask)
-    print(f"Filter applied (cutoff={cutoff} Angstrom): Kept {kept_elements}/{total_elements} ({kept_elements/total_elements:.1%}) hopping elements.")
+    if verbose:
+        print(f"Filter applied (cutoff={cutoff:.3f} units of 1/k_theta): Kept {kept_elements}/{total_elements} ({kept_elements/total_elements:.1%}) hopping elements.")
     
     return HR_filtered, keep_mask
 
-def filter_hopping_by_energy(HR: np.ndarray, thres: float) ->  tuple[npt.NDArray[np.complex128], npt.NDArray[np.bool_]]:
+def filter_hopping_by_energy(HR: np.ndarray, thres: float, verbose: bool = False) ->  tuple[npt.NDArray[np.complex128], npt.NDArray[np.bool_]]:
     keep_mask = (np.abs(HR) > thres)
     HR_filtered = HR.copy()
     HR_filtered[~keep_mask] = 0. + 0.j
     total_elements = keep_mask.size
     kept_elements = np.sum(keep_mask)
-    print(f"Filter applied (cutoff={thres} meV): Kept {kept_elements}/{total_elements} ({kept_elements/total_elements:.1%}) hopping elements.")
+    if verbose:
+        print(f"Filter applied (cutoff={thres:.3f} meV): Kept {kept_elements}/{total_elements} ({kept_elements/total_elements:.1%}) hopping elements.")
     
     return HR_filtered, keep_mask
 

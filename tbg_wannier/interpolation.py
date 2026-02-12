@@ -14,6 +14,9 @@ from .wannier90 import read_u_mat
 from .trials import lowdin_project
 from .hoppings import filter_hopping_by_separation, build_hopping_from_U
 import tinyarray as ta
+import os
+import hashlib
+from types import SimpleNamespace
 
 def plot_interpolation_check(HR, R_cart, HR_fine, R_cart_fine, orb_i, orb_j):
     """
@@ -109,7 +112,7 @@ class InterpolatedHamiltonian:
             print("Upscale factor is 1, skipping interpolation.")
             print(f"Filtering hoppings with separation > {cutoff} ktheta^-1...")
             self.HR_fine, self.mask = filter_hopping_by_separation(
-                lat, HR, R_cart, cutoff=cutoff
+                HR, R_cart, cutoff=cutoff
             )
             self.R_fine_cart = R_cart * self.scale_factor  # Store physical coordinates for filtering
             nx, ny = self.HR_fine.shape[:2]
@@ -148,7 +151,7 @@ class InterpolatedHamiltonian:
             print(f"Filtering hoppings with separation > {cutoff} ktheta^-1...")
             # Note: This modifies HR_fine to zero out distant hoppings
             self.HR_fine, self.mask = filter_hopping_by_separation(
-                lat, self.HR_fine, self.R_fine_cart * ktheta, cutoff=cutoff
+                self.HR_fine, self.R_fine_cart * ktheta, cutoff=cutoff
             )
             
         print("Model initialization complete.")
@@ -281,12 +284,264 @@ class ModelManager:
         self.cutoff_Ang = cutoff_Ang
         self.models: Dict[float, InterpolatedHamiltonian] = {}
 
+        # Optional Theta interpolator (filled via create_theta_interpolator)
+        self.theta_interp = None
+
+    def create_theta_interpolator(self, sample_thetas, cache_dir="cache"):
+        """
+        Create and cache a ThetaInterpolator for this manager's trial_wann.
+
+        sample_thetas: iterable of angles (degrees) to precompute (coarse HRs)
+        cache_dir: path to save per-theta HR files
+        """
+        self.theta_interp = ThetaInterpolator(self.trial_wann, list(sample_thetas), cache_dir=cache_dir)
+        return self.theta_interp
+
     def get_model(self, theta: float, upscale: int) -> InterpolatedHamiltonian:
         key = (theta, upscale)
         if key not in self.models:
-            self.models[key] = InterpolatedHamiltonian(
-                theta, self.trial_wann, 
-                cutoff_Ang=self.cutoff_Ang, 
-                upscale_factor=upscale
-            )
+            # If a theta-space interpolator exists, attempt to synthesize an HR-based
+            # model (fast) by requesting the desired upscale and cutoff.
+            if self.theta_interp is not None:
+                hr_obj = self.theta_interp.get_interpolated(theta, upscale=upscale, cutoff_Ang=self.cutoff_Ang)
+                if hr_obj is not None:
+                    self.models[key] = HRWrapper(hr_obj)
+                else:
+                    # fallback to full construction
+                    self.models[key] = InterpolatedHamiltonian(
+                        theta, self.trial_wann, 
+                        cutoff_Ang=self.cutoff_Ang, 
+                        upscale_factor=upscale
+                    )
+            else:
+                self.models[key] = InterpolatedHamiltonian(
+                    theta, self.trial_wann, 
+                    cutoff_Ang=self.cutoff_Ang, 
+                    upscale_factor=upscale
+                )
         return self.models[key]    
+
+
+class ThetaInterpolator:
+    """
+    Manages precomputation and cached storage of HR grids at sampled thetas,
+    and synthesizes interpolated HR grids for arbitrary theta via linear
+    interpolation between nearest samples. The sampled HRs are stored in
+    NPZ files under `cache_dir/theta_samples/<trial_hash>/` and interpolated
+    results are saved under `cache_dir/theta_interp/<trial_hash>/`.
+    """
+    def __init__(self, trial_wann, sample_thetas, cache_dir="cache"):
+        """Only cache coarse (non-upsampled) samples. Upscaling and
+        separation filtering are done on-demand by `get_interpolated`.
+        """
+        self.trial_wann = trial_wann
+        self.sample_thetas = sorted(list(sample_thetas))
+        self.cache_dir = Path(cache_dir)
+        # cutoff and upscale will be passed to get_interpolated at call time
+
+        # compute trial hash for unique cache folder
+        h = hashlib.sha1()
+        h.update(np.asarray(trial_wann).tobytes())
+        self.trial_hash = h.hexdigest()[:16]
+
+        self.samples_dir = self.cache_dir / "theta_samples" / self.trial_hash
+        os.makedirs(self.samples_dir, exist_ok=True)
+
+        # Precompute and cache sample HRs
+        self._precompute_samples()
+
+    def _sample_path(self, theta):
+        return self.samples_dir / f"theta_{theta:.6f}_HR.npz"
+
+    def _interp_path(self, theta):
+        # Interpolated/upscaled results are not cached anymore; keep helper
+        return self.samples_dir / f"interp_{theta:.6f}_HR.npz"
+
+    def _precompute_samples(self):
+        for t in self.sample_thetas:
+            path = self._sample_path(t)
+            if path.exists():
+                continue
+            print(f"ThetaInterpolator: computing sample for theta={t}°")
+            # Precompute coarse (non-upsampled) HR and mask. We always sample at
+            # upscale_factor=1 so interpolation happens in theta-space first.
+            model = InterpolatedHamiltonian(t, self.trial_wann, upscale_factor=1, cutoff_Ang=np.inf, cache_dir=str(self.cache_dir))
+            # model could be None (failed U projection)
+            if model is None:
+                print(f"  > sample theta={t}: failed to produce model (skipped)")
+                continue
+            # Save arrays (use np.savez_compressed)
+            # store as coarse-version to make intent explicit
+            np.savez_compressed(path,
+                                HR_coarse=model.HR_fine,
+                                mask_coarse=model.mask,
+                                R_coarse_cart=model.R_fine_cart,
+                                center_idx=model.center_idx,
+                                a1=model.a1,
+                                a2=model.a2,
+                                scale_factor=model.scale_factor,
+                                upscale=model.upscale)
+
+    def _load_sample(self, theta):
+        path = self._sample_path(theta)
+        if not path.exists():
+            return None
+        data = np.load(path, allow_pickle=True)
+        # support older caches (HR_fine key) and new (HR_coarse)
+        if 'HR_coarse' in data:
+            HR = data['HR_coarse']
+            mask = data['mask_coarse'] if 'mask_coarse' in data else data.get('mask')
+            R = data['R_coarse_cart'] if 'R_coarse_cart' in data else data.get('R_fine_cart')
+        else:
+            HR = data['HR_fine']
+            mask = data.get('mask')
+            R = data.get('R_fine_cart')
+        return SimpleNamespace(HR=HR, mask=mask, R_cart=R, center_idx=data['center_idx'], a1=data['a1'], a2=data['a2'], scale_factor=float(data['scale_factor']), upscale=int(data['upscale']))
+
+    def get_interpolated(self, theta, upscale: int = 16, cutoff_Ang: float | None = None, verbose: bool = False):
+        """
+        Interpolate in theta-space using the cached coarse samples, then
+        upscale the resulting coarse grid by `upscale` and apply
+        `filter_hopping_by_separation` with `cutoff_Ang` (in Angstrom / nm
+        units as used elsewhere). Returns an object with attributes
+        matching the `InterpolatedHamiltonian` output: HR_fine, mask,
+        R_fine_cart, center_idx, a1, a2, scale_factor, upscale.
+        """
+        # exact coarse sample available?
+        exact = self._load_sample(theta)
+        if cutoff_Ang is None:
+            # default no cutoff conservative fallback
+            cutoff_Ang = np.inf
+            if exact is not None and upscale == 1:
+            # Return coarse sample directly
+                print("found exact coarse sample for requested theta; returning without interpolation.")
+                return exact
+        # find bracketing samples
+        if theta < self.sample_thetas[0] or theta > self.sample_thetas[-1]:
+            print("ThetaInterpolator: requested theta outside sample range; cannot interpolate.")
+            return None
+
+        # find nearest lower and upper
+        t0 = max([t for t in self.sample_thetas if t <= theta])
+        t1 = min([t for t in self.sample_thetas if t >= theta])
+        if t0 == t1:
+            return self._load_sample(t0)
+
+        s0 = self._load_sample(t0)
+        s1 = self._load_sample(t1)
+        if s0 is None or s1 is None:
+            print("ThetaInterpolator: missing sample files for interpolation.")
+            return None
+        # Ensure grid alignment (coarse grids)
+        if s0.HR.shape != s1.HR.shape:
+            print("ThetaInterpolator: sample HR grids have mismatched shapes; cannot interpolate.")
+            return None
+        scale_theta = s0.scale_factor * np.sin(t0 * np.pi / 180) / np.sin(theta * np.pi / 180)  # Adjust scale for target theta
+        a1_theta = s0.a1 * scale_theta / s0.scale_factor
+        a2_theta = s0.a2 * scale_theta / s0.scale_factor
+
+        cutoff_internal = cutoff_Ang / scale_theta  # Convert cutoff to internal units for filtering after interpolation
+        # linear weight in theta
+        w = (theta - t0) / (t1 - t0)
+        HR_coarse_interp = (1.0 - w) * s0.HR + w * s1.HR
+        R_coarse_cart = s0.R_cart / s0.scale_factor
+        # If requested coarse grid, return packaged coarse result
+        if upscale == 1:
+            HR_filtered, mask_filtered = filter_hopping_by_separation(HR_coarse_interp, R_coarse_cart, cutoff=cutoff_internal, verbose=verbose)
+            out = SimpleNamespace(HR=HR_filtered, mask=mask_filtered,
+                                   R_cart=R_coarse_cart * scale_theta, center_idx=s0.center_idx, a1=a1_theta, a2=a2_theta, scale_factor=scale_theta, upscale=1)
+            return out
+
+        # Upscale (Fourier resample) AFTER theta interpolation
+        HR_fine = resample_HR(HR_coarse_interp, upscale)
+
+        # Recreate Rcart using fractional coords as in InterpolatedHamiltonian
+        nx, ny = HR_fine.shape[:2]
+        center_idx = np.array([nx // 2, ny // 2])
+        i_range = np.arange(nx) - center_idx[0]
+        j_range = np.arange(ny) - center_idx[1]
+        I, J = np.meshgrid(i_range, j_range, indexing='ij')
+        C1 = I / upscale
+        C2 = J / upscale
+        R_fine_cart = (C1[..., np.newaxis] * a1_theta + C2[..., np.newaxis] * a2_theta)
+
+        # Apply separation filtering in internal units to match original behavior
+        # use average scale_factor from s0 and s1
+        HR_filtered, mask_filtered = filter_hopping_by_separation(HR_fine, R_fine_cart / scale_theta, cutoff=cutoff_internal, verbose=verbose)
+
+        out = SimpleNamespace(HR=HR_filtered, mask=mask_filtered,
+                               R_cart=R_fine_cart, center_idx=center_idx, a1=a1_theta, a2=a2_theta, scale_factor=scale_theta, upscale=upscale)
+        return out
+
+
+class HRWrapper:
+    """
+    Lightweight wrapper that exposes the minimal interface expected by
+    the rest of the code (attributes and lookup methods) given precomputed
+    HR grid and related geometry data (produced by ThetaInterpolator).
+    """
+    def __init__(self, hr_obj: SimpleNamespace):
+        self.HR_fine = hr_obj.HR
+        self.mask = hr_obj.mask
+        self.R_fine_cart = hr_obj.R_cart
+        self.center_idx = np.array(hr_obj.center_idx, dtype=int)
+        self.a1 = hr_obj.a1
+        self.a2 = hr_obj.a2
+        self.scale_factor = float(hr_obj.scale_factor)
+        self.upscale = int(hr_obj.upscale)
+
+        self.basis = np.column_stack((self.a1, self.a2))
+        self.inv_basis = np.linalg.inv(self.basis)
+
+    def get_hopping(self, displacement_cart: np.ndarray):
+        c = self.inv_basis @ displacement_cart
+        idx_float = self.center_idx + c * self.upscale
+        idx = np.rint(idx_float).astype(int)
+        nx, ny = self.HR_fine.shape[:2]
+        if (0 <= idx[0] < nx) and (0 <= idx[1] < ny):
+            if self.mask[idx[0], idx[1]].any():
+                return ta.array(self.HR_fine[idx[0], idx[1]])
+        return None
+
+    def get_hoppings_vectorized(self, displacements_cart: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        c = displacements_cart @ self.inv_basis.T
+        idx_float = self.center_idx + c * self.upscale
+        idx = np.rint(idx_float).astype(int)
+        nx, ny = self.HR_fine.shape[:2]
+        in_bounds = (idx[:, 0] >= 0) & (idx[:, 0] < nx) & (idx[:, 1] >= 0) & (idx[:, 1] < ny)
+        n_hops = displacements_cart.shape[0]
+        matrices = np.zeros((n_hops, self.HR_fine.shape[2], self.HR_fine.shape[3]), dtype=complex)
+        valid_mask = np.zeros(n_hops, dtype=bool)
+        valid_locs = np.where(in_bounds)[0]
+        if len(valid_locs) > 0:
+            ix = idx[valid_locs, 0]
+            iy = idx[valid_locs, 1]
+            mask_vals = self.mask[ix, iy].any()
+            final_locs = valid_locs[mask_vals]
+            if len(final_locs) > 0:
+                fix = idx[final_locs, 0]
+                fiy = idx[final_locs, 1]
+                matrices[final_locs] = self.HR_fine[fix, fiy]
+                valid_mask[final_locs] = True
+        return matrices, valid_mask
+
+    def get_lattice_hopping(self):
+        center_idx = self.center_idx
+        n_x, n_y, _, _ = self.HR_fine.shape
+        if self.upscale != 1:
+            raise ValueError("get_lattice_hopping is only valid for upscale_factor=1.")
+        hopping_data = []
+        for i in range(n_x):
+            for j in range(n_y):
+                dx = i - center_idx[0]
+                dy = j - center_idx[1]
+                if dx == 0 and dy == 0:
+                    continue
+                if not (dx < 0 or (dx == 0 and dy < 0)):
+                    continue
+                mat = self.HR_fine[i, j].copy()
+                if np.all(mat == 0):
+                    continue
+                hopping_data.append((dx, dy, ta.array(mat)))
+        print(f"✓ Hoppings retained: {len(hopping_data)} unique vectors after filtering.")
+        return hopping_data
