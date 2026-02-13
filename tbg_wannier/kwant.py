@@ -80,8 +80,8 @@ def attach_square_leads(syst: kwant.Builder, width: float, height: float,
         return (-width/2 <= x <= width/2) and (-height/2<= y <= -height/2 + buff)
     
     # Add buffer sites
-    syst[lat_lead.shape(shape_top, (0, height/2))] = lead_onsite
-    syst[lat_lead.shape(shape_bot, (0, -height/2))] = lead_onsite
+    syst[lat_lead.shape(shape_top, (0, height/2 - buff/2))] = lead_onsite
+    syst[lat_lead.shape(shape_bot, (0, -height/2 + buff/2))] = lead_onsite
     
     # Add internal lead hoppings within the buffer
     syst[lat_lead.neighbors()] = lead_hopping
@@ -159,6 +159,55 @@ def attach_square_leads(syst: kwant.Builder, width: float, height: float,
         print("  > Leads attached successfully.")
 
 
+def attach_bulk_leads_matching_domain(syst: kwant.Builder, lat, onsite, hoppings,
+                                     domain_sites_positions, lead_trans=(0, 1),
+                                     extend: float = 1.0, verbose: bool = False):
+    """
+    Attach two infinite leads (top and bottom) that use the same onsite
+    energy and lattice hoppings as the provided bulk domain.
+
+    Args:
+        syst: The populated finite system builder.
+        lat: The Kwant lattice associated with the domain (returned by kwant.lattice.general).
+        onsite: Onsite Hamiltonian matrix (numpy / tinyarray) for each site.
+        hoppings: Iterable of (dx, dy, mat) lattice hoppings as returned by the model.
+        domain_sites_positions: Array-like of site positions (Nx2) for computing cross-section.
+        lead_trans: Translation vector for lead periodicity (tuple-like, e.g. model.a2).
+        extend: Padding added to the cross-section in the x-direction (same units as positions).
+        verbose: Print progress if True.
+    """
+    if verbose:
+        print("\n--- Attaching Bulk-Matching Leads ---")
+    
+    x_min, x_max = float(domain_sites_positions[:, 0].min()), float(domain_sites_positions[:, 0].max())
+    pad = float(extend)
+
+    def lead_shape(p):
+        x, y = p
+        return (x_min - pad) <= x <= (x_max + pad)
+
+    # Top lead: translational symmetry along lead_trans
+    sym_top = kwant.TranslationalSymmetry(tuple(lead_trans))
+    lead_top = kwant.Builder(sym_top)
+    lead_top[lat.shape(lead_shape, (0, 0))] = ta.array(onsite)
+    for dx, dy, mat in hoppings:
+        lead_top[kwant.builder.HoppingKind((dx, dy), lat, lat)] = ta.array(mat)
+
+    # Bottom lead: opposite translation
+    neg_trans = tuple((-np.array(lead_trans)).tolist())
+    sym_bot = kwant.TranslationalSymmetry(neg_trans)
+    lead_bot = kwant.Builder(sym_bot)
+    lead_bot[lat.shape(lead_shape, (0, 0))] = ta.array(onsite)
+    for dx, dy, mat in hoppings:
+        lead_bot[kwant.builder.HoppingKind((dx, dy), lat, lat)] = ta.array(mat)
+
+    syst.attach_lead(lead_top)
+    syst.attach_lead(lead_bot)
+
+    if verbose:
+        print("  > Bulk-matching leads attached.")
+
+
 def build_system(domains: list[DomainDef], trial_wann: np.ndarray = None, cutoff_Ang: float = 400.0,
                   verbose: bool =True, sample_thetas: list[float] = None) -> kwant.Builder:
     """
@@ -218,6 +267,21 @@ def build_system(domains: list[DomainDef], trial_wann: np.ndarray = None, cutoff
             'lattice': lat,
             'theta': dom.theta
         }
+
+    # If only one domain, attach leads that reuse the domain's onsite and hoppings
+    if len(domains) == 1:
+        if verbose:
+            print("\nSingle-domain detected — attaching leads matching domain Hamiltonian...")
+        dom0 = domains[0]
+        model0 = manager.get_model(dom0.theta, upscale=1)
+        lat0 = domain_data[0]['lattice']
+        onsite0 = ta.array(model0.HR_fine[tuple(model0.center_idx)])
+        hopp0 = list(model0.get_lattice_hopping())
+        positions0 = np.array([s.pos for s in domain_data[0]['sites']])
+        lead_trans = tuple(model0.a2 + model0.a1)
+        extend = model0.scale_factor * 2
+        attach_bulk_leads_matching_domain(syst, lat0, onsite0, hopp0, positions0,
+                                         lead_trans=lead_trans, extend=extend, verbose=verbose)
 
     # --- 2. Compute Interfaces (Vectorized) ---
     if verbose:

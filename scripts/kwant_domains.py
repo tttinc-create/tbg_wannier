@@ -76,7 +76,7 @@ def main():
     domains = ShapePartitioner.voronoi_rectangle(width, height, thetas)
 
     syst = build_system(domains, trial_wann=wann, cutoff_Ang=np.inf, sample_thetas=[1.05])
-    attach_square_leads(syst, 0.5 * width, height, lead_a=lattice_size/10, lead_t=100.0, coupling_t=100.0, cutoff=lattice_size)
+    # attach_square_leads(syst, 0.5 * width, height, lead_a=lattice_size/10, lead_t=100.0, coupling_t=100.0, cutoff=lattice_size)
     kwant.plot(syst)
     # print("System built. Finalizing...")
 
