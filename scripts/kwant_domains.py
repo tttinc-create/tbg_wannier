@@ -49,11 +49,11 @@ def plot_conductance(syst, energies):
     plt.savefig("conductance.png", dpi=300)
 
 def main():
-    model, eigvals, eigvecs, _ = load_eigensystem("cache/bm_eigs_th1p05_wr0p8_w1110_NL20_Nk6_nb10_bv0_k4ca93f82a1.npz")
+    model, eigvals, eigvecs, _ = load_eigensystem("cache/eigensystems/bm_eigs_th1p05_wr0p8_w1110_NL20_Nk6_nb10_bv0_k4ca93f82a1.npz")
     ktheta = model.params.ktheta
     lat = model.lat
     lattice_size = 1/ktheta * np.linalg.norm(model.lat.a1)
-    # print(f"real space unit cell size {lattice_size:.2f} Angstrom")
+    print(f"real space unit cell size {lattice_size:.2f} Angstrom")
     # # Select 10 neutrality bands
     # eig10b, vec10b = select_neutrality_bands(eigvals, eigvecs, n=10)
     # u_path = "wan90/bm_th1p05_wr0p8_w1110_NL20_Nk6/bm_10b_u.mat"
@@ -62,25 +62,25 @@ def main():
     # trial_wann = vec10b @ U  # Use the computed trial Wannier functions
 
     wann = np.load("wan90/bm_th1p05_wr0p8_w1110_NL20_Nk6/bm_10b_wanniers.npz")['wanniers']
-    sample_thetas = [0.98, 1.05]
+    # sample_thetas = [0.98, 1.05, 1.10]
     # # print(f"Creating ThetaInterpolator with sample thetas: {sample_thetas}")
-    # interpolator = ThetaInterpolator(wann, sample_thetas=sample_thetas)
-    # out = interpolator.get_interpolated(1.05, upscale=1, verbose=True, cutoff_Ang=10)
-    # plot_hr_tiles_simple_triangular(out.mask, out.R_cart, savepath="hr_tiles_interpolated.png", scale="linear")
+    # interpolator = ThetaInterpolator(wann, sample_thetas=sample_thetas, interp_kind='pchip')
+    # out = interpolator.get_interpolated(1.10, upscale=1, verbose=True, cutoff_Ang=300)
+    # plot_hr_tiles_simple_triangular(out.mask, out.R_cart, savepath="images/hr_tiles_interpolated.png", scale="linear")
     # k_path, dists, ticks, labels = symmetry_path(lat, nseg=20)    
     # evals = solve_wannier_bands(k_path, out.HR, out.R_cart/out.scale_factor)
-    # plot_band_structure(dists, evals, ticks, labels, savepath="bands.png")
+    # plot_band_structure(dists, evals, ticks, labels, savepath="images/bands.png")
     width, height = 2000., 10000. # Angstrom dimensions for the system
     np.random.seed(42)
     thetas = [1.05]  # Example: random twist angle for disorder
     domains = ShapePartitioner.voronoi_rectangle(width, height, thetas)
 
-    syst = build_system(domains, trial_wann=wann, cutoff_Ang=np.inf, sample_thetas=sample_thetas)
-    # attach_square_leads(syst, 0.5 * width, height, lead_a=lattice_size, lead_t=100.0, coupling_t=100.0, cutoff=2*lattice_size)
-    # kwant.plot(syst)
+    syst = build_system(domains, trial_wann=wann, cutoff_Ang=np.inf, sample_thetas=[1.05])
+    attach_square_leads(syst, 0.5 * width, height, lead_a=lattice_size/10, lead_t=100.0, coupling_t=100.0, cutoff=lattice_size)
+    kwant.plot(syst)
     # print("System built. Finalizing...")
 
-    plot_dos = True
+    plot_dos = False
     if plot_dos:
         fsyst = syst.finalized()
         spectrum = kwant.kpm.SpectralDensity(fsyst)
@@ -93,7 +93,7 @@ def main():
         ax.set_ylabel("Density of States")
         plt.suptitle("Density of States for Pristine TBG System")
         plt.tight_layout()
-        plt.savefig("DOS_theta1p05.png", dpi=300)
+        plt.savefig("images/DOS_theta1p05.png", dpi=300)
         # --- USAGE EXAMPLE ---
     # Assuming you have loaded HR and lat_vectors from your previous code:
     # plot_interpolation_check(HR, R_cart, 5, 3)

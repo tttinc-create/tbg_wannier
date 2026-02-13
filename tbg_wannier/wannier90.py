@@ -1106,7 +1106,7 @@ def run_workflow_for_angle(
     recipe_8b: WannierizationRecipe,
     seed: str = "bm",
     wan90_root: str = "wan90",
-    cache_dir: str = "cache",
+    cache_dir: str = "cache/eigensystems",
     verbose: bool = True,
     plotting: bool = False,
     wannier90_x_path: Optional[str | Path] = None,

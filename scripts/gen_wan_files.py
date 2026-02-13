@@ -48,10 +48,10 @@ def main():
             recipe_8b=recipe8b,
             seed="bm",
             wan90_root="wan90",
-            cache_dir="cache",
+            cache_dir="cache/eigensystems",
             verbose=True,
             plotting=True,
-            wannier90_x_path="/home/tobyfeng/wannier90/tbg_wannier_package/wannier90.x",
+            wannier90_x_path="/home/fengw/tbg_wannier/wannier90.x",
         )
 if __name__ == "__main__":
     main()

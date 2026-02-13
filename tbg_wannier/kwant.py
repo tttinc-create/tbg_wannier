@@ -73,15 +73,15 @@ def attach_square_leads(syst: kwant.Builder, width: float, height: float,
     
     def shape_top(pos):
         x, y = pos
-        return (-width/2 <= x <= width/2) and (height/2 <= y <= height/2 + buff)
+        return (-width/2 <= x <= width/2) and (height/2 - buff <= y <= height/2 )
 
     def shape_bot(pos):
         x, y = pos
-        return (-width/2 <= x <= width/2) and (-height/2 - buff<= y <= -height/2)
+        return (-width/2 <= x <= width/2) and (-height/2<= y <= -height/2 + buff)
     
     # Add buffer sites
-    syst[lat_lead.shape(shape_top, (0, height/2 + 0.5*buff))] = lead_onsite
-    syst[lat_lead.shape(shape_bot, (0, -height/2 - 0.5*buff))] = lead_onsite
+    syst[lat_lead.shape(shape_top, (0, height/2))] = lead_onsite
+    syst[lat_lead.shape(shape_bot, (0, -height/2))] = lead_onsite
     
     # Add internal lead hoppings within the buffer
     syst[lat_lead.neighbors()] = lead_hopping
@@ -109,22 +109,27 @@ def attach_square_leads(syst: kwant.Builder, width: float, height: float,
     
     tree_lead = cKDTree(pos_lead)
     tree_tbg = cKDTree(pos_tbg)
-    
+    mat_coupling = coupling_t * np.eye(10)
     # Find neighbors within cutoff
     if verbose:
-        print(f"  > Computing couplings (cutoff={cutoff} nm)...")
-    results = tree_lead.query_ball_tree(tree_tbg, r=cutoff)
-    
-    # Coupling Matrix (Simple scalar tunneling * Identity)
-    mat_coupling = ta.array(coupling_t * np.eye(10))
-    
+        print(f"  > Computing couplings (exponential decay length={cutoff} Angstrom)...")
     count = 0
+    results = tree_lead.query_ball_tree(tree_tbg, r=4*cutoff)
+    # Coupling Matrix (Simple scalar tunneling * Identity)
+    
     for i_lead, neighbors in enumerate(results):
         site_lead = sites_lead[i_lead]
         for i_tbg in neighbors:
             site_tbg = sites_tbg[i_tbg]
-            syst[site_lead, site_tbg] = mat_coupling
+            syst[site_lead, site_tbg] = ta.array(mat_coupling * np.exp(-np.linalg.norm(pos_lead[i_lead] - pos_tbg[i_tbg])/cutoff))  # Optional: exponential decay with distance
             count += 1
+
+    # for i_lead, pos in enumerate(pos_lead):
+    #     dd, ii = tree_tbg.query(pos, k=6, distance_upper_bound=4*cutoff)
+    #     for dist, i_tbg in zip(dd, ii):
+    #         syst[sites_lead[i_lead], sites_tbg[i_tbg]] = ta.array(mat_coupling * np.exp(-dist/cutoff))  # Optional: exponential decay with distance
+    #         count += 1
+
             
     if verbose:
         print(f"  > Added {count} coupling hoppings.")
@@ -197,11 +202,11 @@ def build_system(domains: list[DomainDef], trial_wann: np.ndarray = None, cutoff
         # We start flood fill from seed, or just use shape
         # For disconnected domains, straightforward shape usage is safer than flood fill
         # valid_seed = find_valid_start(lat, dom.shape_func, dom.seed_point)  # Just to check if seed is valid
-        syst[lat.shape(dom.shape_func, dom.seed_point)] = model.HR_fine[tuple(model.center_idx)]
+        syst[lat.shape(dom.shape_func, dom.seed_point)] = ta.array(model.HR_fine[tuple(model.center_idx)])
         
         # Add Bulk Hoppings (Internal)
         for dx, dy, mat in model.get_lattice_hopping():
-            syst[kwant.builder.HoppingKind((dx, dy), lat, lat)] = mat
+            syst[kwant.builder.HoppingKind((dx, dy), lat, lat)] = ta.array(mat)
             
         # Store sites for interface step
         sites = [s for s in syst.sites() if s.family == lat]

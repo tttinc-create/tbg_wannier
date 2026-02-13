@@ -2,6 +2,7 @@ from typing import Dict
 import numpy as np
 from pyparsing import Dict
 import scipy as scipy
+from scipy import interpolate
 from pathlib import Path
 import numpy.typing as npt
 
@@ -64,13 +65,45 @@ def resample_HR(HR, upscale_factor):
     resampled = scipy.signal.resample(tmp, upscale_factor*numy, axis = 1)
     return resampled
 
+
+def _interpolate_along_theta(theta_vals, arr_stack, theta, kind='linear'):
+    """
+    Interpolate `arr_stack` (shape (n_thetas, ...)) at `theta`.
+    Supports complex arrays by interpolating real and imag separately.
+    `kind` may be any interp1d `kind` or 'pchip' for PCHIP interpolation.
+    """
+    theta_vals = np.asarray(theta_vals)
+    # ensure sorted
+    sort_idx = np.argsort(theta_vals)
+    theta_vals_sorted = theta_vals[sort_idx]
+    arr_sorted = arr_stack[sort_idx]
+
+    is_complex = np.iscomplexobj(arr_sorted)
+
+    def _call_interp(x_vals, y_stack):
+        if kind == 'pchip':
+            interp_fn = interpolate.PchipInterpolator(theta_vals_sorted, y_stack, axis=0)
+            return interp_fn(x_vals)
+        else:
+            interp_fn = interpolate.interp1d(theta_vals_sorted, y_stack, axis=0, kind=kind, assume_sorted=True)
+            return interp_fn(x_vals)
+
+    if is_complex:
+        real_stack = arr_sorted.real
+        imag_stack = arr_sorted.imag
+        real_interp = _call_interp(theta, real_stack)
+        imag_interp = _call_interp(theta, imag_stack)
+        return real_interp + 1j * imag_interp
+    else:
+        return _call_interp(theta, arr_sorted)
+
 class InterpolatedHamiltonian:
     """
     Manages the real-space Hamiltonian for a specific twist angle.
     Upsamples the grid and creates an efficient lookup table for hoppings.
     """
     def __init__(self, theta_deg, trial_wann, upscale_factor=16, cutoff_Ang=10.0,
-                 cache_dir="cache"):
+                 cache_dir="cache/eigensystems"):
         self.theta = theta_deg
         self.upscale = upscale_factor
         self.cutoff_Ang = cutoff_Ang
@@ -287,14 +320,14 @@ class ModelManager:
         # Optional Theta interpolator (filled via create_theta_interpolator)
         self.theta_interp = None
 
-    def create_theta_interpolator(self, sample_thetas, cache_dir="cache"):
+    def create_theta_interpolator(self, sample_thetas, cache_dir="cache", interp_kind: str = 'linear'):
         """
         Create and cache a ThetaInterpolator for this manager's trial_wann.
 
         sample_thetas: iterable of angles (degrees) to precompute (coarse HRs)
         cache_dir: path to save per-theta HR files
         """
-        self.theta_interp = ThetaInterpolator(self.trial_wann, list(sample_thetas), cache_dir=cache_dir)
+        self.theta_interp = ThetaInterpolator(self.trial_wann, list(sample_thetas), cache_dir=cache_dir, interp_kind=interp_kind)
         return self.theta_interp
 
     def get_model(self, theta: float, upscale: int) -> InterpolatedHamiltonian:
@@ -330,13 +363,14 @@ class ThetaInterpolator:
     NPZ files under `cache_dir/theta_samples/<trial_hash>/` and interpolated
     results are saved under `cache_dir/theta_interp/<trial_hash>/`.
     """
-    def __init__(self, trial_wann, sample_thetas, cache_dir="cache"):
+    def __init__(self, trial_wann, sample_thetas, cache_dir="cache/eigensystems", interp_kind: str = 'linear'):
         """Only cache coarse (non-upsampled) samples. Upscaling and
         separation filtering are done on-demand by `get_interpolated`.
         """
         self.trial_wann = trial_wann
         self.sample_thetas = sorted(list(sample_thetas))
         self.cache_dir = Path(cache_dir)
+        self.interp_kind = interp_kind
         # cutoff and upscale will be passed to get_interpolated at call time
 
         # compute trial hash for unique cache folder
@@ -413,39 +447,57 @@ class ThetaInterpolator:
             # default no cutoff conservative fallback
             cutoff_Ang = np.inf
             if exact is not None and upscale == 1:
-            # Return coarse sample directly
+                # Return coarse sample directly
                 print("found exact coarse sample for requested theta; returning without interpolation.")
                 return exact
-        # find bracketing samples
+
+        # ensure theta within sample range
         if theta < self.sample_thetas[0] or theta > self.sample_thetas[-1]:
             print("ThetaInterpolator: requested theta outside sample range; cannot interpolate.")
             return None
 
-        # find nearest lower and upper
-        t0 = max([t for t in self.sample_thetas if t <= theta])
-        t1 = min([t for t in self.sample_thetas if t >= theta])
-        if t0 == t1:
-            return self._load_sample(t0)
+        # Load available samples
+        available = []
+        for t in self.sample_thetas:
+            s = self._load_sample(t)
+            if s is not None:
+                available.append((t, s))
 
-        s0 = self._load_sample(t0)
-        s1 = self._load_sample(t1)
-        if s0 is None or s1 is None:
-            print("ThetaInterpolator: missing sample files for interpolation.")
+        if len(available) == 0:
+            print("ThetaInterpolator: no cached samples available for interpolation.")
             return None
-        # Ensure grid alignment (coarse grids)
-        if s0.HR.shape != s1.HR.shape:
+        t0, s0 = available[0]
+        # If only a single sample is available, return it for coarse requests
+        if len(available) == 1:
+            if upscale == 1:
+                HR_filtered, mask_filtered = filter_hopping_by_separation(s0.HR, s0.R_cart / s0.scale_factor, cutoff=np.inf if cutoff_Ang is None else cutoff_Ang / s0.scale_factor, verbose=verbose)
+                out = SimpleNamespace(HR=HR_filtered, mask=mask_filtered,
+                                       R_cart=s0.R_cart, center_idx=s0.center_idx, a1=s0.a1, a2=s0.a2, scale_factor=s0.scale_factor, upscale=1)
+                return out
+
+        # Build arrays for interpolation from the available samples
+        thetas_av = np.array([t for t, _ in available])
+        # Ensure all HR grids have matching shapes
+        shapes = [s.HR.shape for _, s in available]
+        if not all(sh == shapes[0] for sh in shapes):
             print("ThetaInterpolator: sample HR grids have mismatched shapes; cannot interpolate.")
             return None
-        scale_theta = s0.scale_factor * np.sin(t0 * np.pi / 180) / np.sin(theta * np.pi / 180)  # Adjust scale for target theta
+
+        HR_stack = np.stack([s.HR for _, s in available], axis=0)
+        scale_theta = s0.scale_factor * np.sin(t0 * np.pi / 360) / np.sin(theta * np.pi / 360) # Adjust scale factor based on theta
+
+        # Interpolate coarse HR and lattice vectors at target theta
+        HR_coarse_interp = _interpolate_along_theta(thetas_av, HR_stack, theta, kind=self.interp_kind)
         a1_theta = s0.a1 * scale_theta / s0.scale_factor
         a2_theta = s0.a2 * scale_theta / s0.scale_factor
+        scale_theta = float(scale_theta)
 
-        cutoff_internal = cutoff_Ang / scale_theta  # Convert cutoff to internal units for filtering after interpolation
-        # linear weight in theta
-        w = (theta - t0) / (t1 - t0)
-        HR_coarse_interp = (1.0 - w) * s0.HR + w * s1.HR
+        cutoff_internal = np.inf if cutoff_Ang is None else (cutoff_Ang / scale_theta)
+
+        # Use fractional R from the first sample normalized by its scale (same as before)
         R_coarse_cart = s0.R_cart / s0.scale_factor
-        # If requested coarse grid, return packaged coarse result
+
+        # If requested coarse grid, apply separation filter and return
         if upscale == 1:
             HR_filtered, mask_filtered = filter_hopping_by_separation(HR_coarse_interp, R_coarse_cart, cutoff=cutoff_internal, verbose=verbose)
             out = SimpleNamespace(HR=HR_filtered, mask=mask_filtered,
@@ -465,8 +517,7 @@ class ThetaInterpolator:
         C2 = J / upscale
         R_fine_cart = (C1[..., np.newaxis] * a1_theta + C2[..., np.newaxis] * a2_theta)
 
-        # Apply separation filtering in internal units to match original behavior
-        # use average scale_factor from s0 and s1
+        # Apply separation filtering in internal units
         HR_filtered, mask_filtered = filter_hopping_by_separation(HR_fine, R_fine_cart / scale_theta, cutoff=cutoff_internal, verbose=verbose)
 
         out = SimpleNamespace(HR=HR_filtered, mask=mask_filtered,
