@@ -205,7 +205,7 @@ class SymmetryOperator:
             ikp = int(k_map[ik])
             G = tuple(int(x) for x in G_list[ik].ravel()[:2])
             Remb = lat.embedding_matrix(G)
-            S[ik] = eigvecs[ikp].conj().T @ Remb.T @ D_full @ eigvecs[ik]
+            S[ik] = eigvecs[ikp].conj().T @ Remb.T @ D_full @ eigvecs[ik]  # (Nk, nb, nb)
         return S
 
 def repC2zT(lat: MoireLattice, valley: int = +1) -> sp.csr_matrix:
@@ -622,7 +622,9 @@ def mat_DF(choice_EBR: str, k_mesh: np.ndarray, lat: MoireLattice) -> list[dict[
             symm_dict.append({"E": one, "C2x": one, "C3z": one, "C2zT": one})
         elif choice_EBR == "A2a":
             symm_dict.append({"E": one, "C2x": -1*one, "C3z": one, "C2zT": one})
-        elif choice_EBR == "Ea" or choice_EBR == "zhida":
+        elif choice_EBR == "Ea":
+            symm_dict.append({"E": np.eye(2, dtype=complex), "C2x": sx, "C3z": omega_c3z, "C2zT": sx})
+        elif choice_EBR == "zhida":
             symm_dict.append({"E": np.eye(2, dtype=complex), "C2x": sx, "C3z": omega_c3z, "C2zT": sx})
         elif choice_EBR == "Ec":
             phase_C2x = np.array([[np.exp(1j*np.dot(lat.C2x @ k, ri - lat.C2x @ rj)) for rj in lst_Ec] for ri in lst_Ec], dtype=complex)
@@ -932,8 +934,8 @@ def symmetrize_with_P(
     U_new = np.zeros_like(U_cur)
     for ik in range(Nk):
         ikp = k_maps_P[ik]
-        U_new[ik] = U_cur[ik] + D_band_P[ik].T.conj() @ U_cur[ikp] @ D_wann_P
         U_new[ik]  = scipy.linalg.polar(U_new[ik])[0]
+        U_new[ik] = U_cur[ik] + D_band_P[ik].T.conj() @ U_cur[ikp] @ D_wann_P
     U_new /= 2
     return U_new
 
@@ -997,26 +999,67 @@ def symmetrize_u_matrix(
         raise ValueError(f"D_band last dims must be (nb,nb)=({nb},{nb}).")
     if D_wann.shape[2:] != (nw, nw):
         raise ValueError(f"D_wann last dims must be (nw,nw)=({nw},{nw}).")
+
     kmap = _as_0based_sym_kpt_map(sym_kpt_map)
     if kmap.shape != (Nk, Ng):
         raise ValueError(f"sym_kpt_map must be (Nk,Ng)=({Nk},{Ng}), got {kmap.shape}")
+
     U_cur = U.copy()
+
+    # Precompute which elements are antiunitary for separate handling
+    elem_names = group.element_names
+    is_anti_arr = np.array([bool(getattr(group.elements[name].op, "is_antiunitary", False)) for name in elem_names])
+
     for _it in range(max(1, int(n_iter))):
-        U_new = np.zeros_like(U_cur)
-        for ik in range(Nk):
-            acc = np.zeros((nb, nw), dtype=complex)
-            for ig, name in enumerate(elem_names):
-                ikg = int(kmap[ik, ig])  # index of gk
-                is_anti = bool(getattr(group.elements[name].op, "is_antiunitary", False))
-                if is_anti:
-                    rep_mat = group.elements[name].op.rep_matrix(lat)
-                    acc += eigvecs[ik].conj().T @ rep_mat @ eigvecs[ikg].conj() @ U_cur[ikg].conj() @ D_wann[ig, ik].T.conj()
-                else:    
-                    acc += D_band[ig, ik].T.conj() @ U_cur[ikg] @ D_wann[ig, ik]
-            acc /= float(Ng)
-            if enforce_semiunitary:
-                acc = scipy.linalg.polar(acc)[0]
-            U_new[ik] = acc
-        U_cur = U_new
+        # Accumulator for all k-points (vectorized over k)
+        acc = np.zeros_like(U_cur, dtype=complex)  # (Nk, nb, nw)
+
+        # Loop over group elements (Ng typically small) but vectorize over Nk
+        for ig, name in enumerate(elem_names):
+            if not is_anti_arr[ig]:
+                # Unitary symmetry: acc_k += D_band_g(k)^
+                #                 @ U[gk] @ D_wann_g(k)
+                D_b = D_band[ig]            # (Nk, nb, nb)
+                U_g = U_cur[kmap[:, ig]]   # (Nk, nb, nw)
+                D_w = D_wann[ig]           # (Nk, nw, nw)
+
+                # tmp = D_b.conj().transpose(0,2,1) @ U_g @ D_w
+                tmp = np.matmul(np.matmul(D_b.conj().transpose(0, 2, 1), U_g), D_w)
+                acc += tmp
+            else:
+                # Antiunitary: S_k = eigvecs[k].H @ rep_mat @ eigvecs[gk].conj()
+                op = group.elements[name].op
+                rep_mat = op.rep_matrix(lat)  # (dim, dim) possibly sparse
+                # ensure dense ndarray for numpy broadcasting/matmul
+                if sp.issparse(rep_mat):
+                    rep_mat = rep_mat.toarray()
+                else:
+                    rep_mat = np.asarray(rep_mat)
+
+                E1 = eigvecs.conj().transpose(0, 2, 1)       # (Nk, nb, dim)
+                E2 = eigvecs[kmap[:, ig]].conj()             # (Nk, dim, nb)
+                # tmp = E1 @ rep_mat -> (Nk, nb, dim); then tmp @ E2 -> (Nk, nb, nb)
+                tmp = np.matmul(E1, rep_mat)
+                S = np.matmul(tmp, E2)
+
+                U_g_conj = U_cur[kmap[:, ig]].conj()        # (Nk, nb, nw)
+                tmp1 = np.matmul(S, U_g_conj)               # (Nk, nb, nw)
+
+                # D_wann term uses transpose+conj as in original code
+                D_w_T_conj = D_wann[ig].transpose(0, 2, 1).conj()  # (Nk, nw, nw)
+                tmp2 = np.matmul(tmp1, D_w_T_conj)          # (Nk, nb, nw)
+                acc += tmp2
+
+        # Average over group
+        acc /= float(Ng)
+
+        if enforce_semiunitary:
+            # Project each k-point back to semi-unitary via polar decomposition
+            U_new = np.empty_like(U_cur)
+            for ik in range(Nk):
+                U_new[ik] = scipy.linalg.polar(acc[ik])[0]
+            U_cur = U_new
+        else:
+            U_cur = acc
 
     return U_cur

@@ -1,4 +1,4 @@
-from typing import Dict
+from typing import Dict, Optional, Any
 import numpy as np
 from pyparsing import Dict
 import scipy as scipy
@@ -102,23 +102,50 @@ class InterpolatedHamiltonian:
     Manages the real-space Hamiltonian for a specific twist angle.
     Upsamples the grid and creates an efficient lookup table for hoppings.
     """
-    def __init__(self, theta_deg, trial_wann, upscale_factor=16, cutoff_Ang=10.0,
-                 cache_dir="cache/eigensystems"):
-        self.theta = theta_deg
+    def __init__(self, theta_deg: float, trial_wann, upscale_factor: int = 16, cutoff_Ang: float = 10.0,
+                 cache_dir: str = "cache/eigensystems", model: Optional[Any] = None,
+                 bm_params: Optional[BMParameters] = None, solver_params: Optional[SolverParameters] = None,
+                 lat_kwargs: Optional[dict] = None):
+        """
+        InterpolatedHamiltonian accepts either a prebuilt `model` (BMModel) or
+        will construct one from `bm_params`, `solver_params` and `lat_kwargs`.
+
+        lat_kwargs may include keys for `MoireLattice.build` such as `N_L` and
+        `N_k` allowing callers to change the k-grid (e.g. `N_k=18`).
+        """
         self.upscale = upscale_factor
         self.cutoff_Ang = cutoff_Ang
-        
+        self._provided_model = model
+
         print(f"\n--- Initializing Model for Theta = {theta_deg:.3f}° ---")
-        
-        # 1. Setup TBG Model
-        lat = MoireLattice.build(N_L=20, N_k=6)
-        bm = BMParameters(name='bm', theta_deg=theta_deg, w1_meV=110.0, 
-                          w_ratio=0.8, two_valleys=False)
-        solver = SolverParameters(nbands=10)
-        model = BMModel(bm, lat, solver=solver)
+
+        # 1. Setup or accept TBG Model
+        if model is None:
+            # build lattice with optional overrides
+            lat_kwargs = lat_kwargs or {}
+            # sensible defaults preserved from existing code
+            N_L = lat_kwargs.pop("N_L", 20)
+            N_k = lat_kwargs.pop("N_k", 6)
+            lat = MoireLattice.build(N_L=N_L, N_k=N_k, **lat_kwargs)
+
+            # build BM and solver params if not provided
+            if bm_params is None:
+                bm = BMParameters(name='bm', theta_deg=theta_deg, w1_meV=110.0,
+                                  w_ratio=0.8, two_valleys=False)
+            else:
+                # ensure theta is set to requested value unless caller supplied custom
+                try:
+                    bm = BMParameters(**{**bm_params.to_dict(), "theta_deg": theta_deg})
+                except Exception:
+                    bm = bm_params
+
+            solver = solver_params if solver_params is not None else SolverParameters(nbands=10)
+            model = BMModel(bm, lat, solver=solver)
+
+        self.model = model
         
         # 2. Get Eigenvalues/Vectors (Cached)
-        _, eigvals, eigvecs, _, _ = get_eigensystem_cached(model, cache_dir=cache_dir, ref_basis=trial_wann, compress_with_reference=True)
+        _, eigvals, eigvecs, _, _ = get_eigensystem_cached(self.model, cache_dir=cache_dir, ref_basis=trial_wann, compress_with_reference=True)
         eig10b, vec10b = select_neutrality_bands(eigvals, eigvecs, n=10)
         
         # 3. Load Projectors (U matrix)
@@ -130,17 +157,17 @@ class InterpolatedHamiltonian:
 
         # 6. Define Physical Lattice Scale
         # Physical lattice vectors = lat.a1 / k_theta
-        ktheta = model.params.ktheta
+        ktheta = self.model.params.ktheta
         self.scale_factor = 1.0 / ktheta 
-        self.a1 = lat.a1 * self.scale_factor
-        self.a2 = lat.a2 * self.scale_factor
+        self.a1 = self.model.lat.a1 * self.scale_factor
+        self.a2 = self.model.lat.a2 * self.scale_factor
         
         self.basis = np.column_stack((self.a1, self.a2))
         self.inv_basis = np.linalg.inv(self.basis)
         cutoff = cutoff_Ang * ktheta  # Convert cutoff to internal units
 
         # 4. Construct Coarse Hoppings H(R)
-        HR, R_cart = build_hopping_from_U(lat, eig10b, U)
+        HR, R_cart = build_hopping_from_U(self.model.lat, eig10b, U)
         if upscale_factor == 1:
             print("Upscale factor is 1, skipping interpolation.")
             print(f"Filtering hoppings with separation > {cutoff} ktheta^-1...")
@@ -320,14 +347,14 @@ class ModelManager:
         # Optional Theta interpolator (filled via create_theta_interpolator)
         self.theta_interp = None
 
-    def create_theta_interpolator(self, sample_thetas, cache_dir="cache", interp_kind: str = 'linear'):
+    def create_theta_interpolator(self, sample_thetas, cache_dir="cache", interp_kind: str = 'linear', **model_kwargs):
         """
         Create and cache a ThetaInterpolator for this manager's trial_wann.
 
-        sample_thetas: iterable of angles (degrees) to precompute (coarse HRs)
-        cache_dir: path to save per-theta HR files
+        Pass model construction/template kwargs (e.g. `model_template`,
+        `lat_kwargs={'N_k':18}`) which are forwarded to ThetaInterpolator.
         """
-        self.theta_interp = ThetaInterpolator(self.trial_wann, list(sample_thetas), cache_dir=cache_dir, interp_kind=interp_kind)
+        self.theta_interp = ThetaInterpolator(self.trial_wann, list(sample_thetas), cache_dir=cache_dir, interp_kind=interp_kind, **model_kwargs)
         return self.theta_interp
 
     def get_model(self, theta: float, upscale: int) -> InterpolatedHamiltonian:
@@ -363,15 +390,27 @@ class ThetaInterpolator:
     NPZ files under `cache_dir/theta_samples/<trial_hash>/` and interpolated
     results are saved under `cache_dir/theta_interp/<trial_hash>/`.
     """
-    def __init__(self, trial_wann, sample_thetas, cache_dir="cache/eigensystems", interp_kind: str = 'linear'):
+    def __init__(self, trial_wann, sample_thetas, cache_dir="cache/eigensystems", interp_kind: str = 'linear',
+                 model_template: Optional[Any] = None, bm_params: Optional[BMParameters] = None,
+                 solver_params: Optional[SolverParameters] = None, lat_kwargs: Optional[dict] = None):
         """Only cache coarse (non-upsampled) samples. Upscaling and
         separation filtering are done on-demand by `get_interpolated`.
+
+        Parameters
+        ----------
+        model_template: optional prebuilt `BMModel` instance to use when
+            constructing sample `InterpolatedHamiltonian`s. If not provided,
+            `bm_params`, `solver_params`, and `lat_kwargs` control building.
         """
         self.trial_wann = trial_wann
         self.sample_thetas = sorted(list(sample_thetas))
         self.cache_dir = Path(cache_dir)
         self.interp_kind = interp_kind
-        # cutoff and upscale will be passed to get_interpolated at call time
+        # store optional model construction/template info
+        self.model_template = model_template
+        self.bm_params = bm_params
+        self.solver_params = solver_params
+        self.lat_kwargs = lat_kwargs
 
         # compute trial hash for unique cache folder
         h = hashlib.sha1()
@@ -399,7 +438,10 @@ class ThetaInterpolator:
             print(f"ThetaInterpolator: computing sample for theta={t}°")
             # Precompute coarse (non-upsampled) HR and mask. We always sample at
             # upscale_factor=1 so interpolation happens in theta-space first.
-            model = InterpolatedHamiltonian(t, self.trial_wann, upscale_factor=1, cutoff_Ang=np.inf, cache_dir=str(self.cache_dir))
+            model = InterpolatedHamiltonian(t, self.trial_wann, upscale_factor=1, cutoff_Ang=np.inf,
+                                            cache_dir=str(self.cache_dir), model=self.model_template,
+                                            bm_params=self.bm_params, solver_params=self.solver_params,
+                                            lat_kwargs=self.lat_kwargs)
             # model could be None (failed U projection)
             if model is None:
                 print(f"  > sample theta={t}: failed to produce model (skipped)")
@@ -432,7 +474,7 @@ class ThetaInterpolator:
             R = data.get('R_fine_cart')
         return SimpleNamespace(HR=HR, mask=mask, R_cart=R, center_idx=data['center_idx'], a1=data['a1'], a2=data['a2'], scale_factor=float(data['scale_factor']), upscale=int(data['upscale']))
 
-    def get_interpolated(self, theta, upscale: int = 16, cutoff_Ang: float | None = None, verbose: bool = False):
+    def get_interpolated(self, theta, upscale: int = 16, cutoff_Ang: float | None = None, verbose: bool = True):
         """
         Interpolate in theta-space using the cached coarse samples, then
         upscale the resulting coarse grid by `upscale` and apply

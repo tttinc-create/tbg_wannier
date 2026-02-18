@@ -189,27 +189,28 @@ def attach_bulk_leads_matching_domain(syst: kwant.Builder, lat, onsite, hoppings
     # Top lead: translational symmetry along lead_trans
     sym_top = kwant.TranslationalSymmetry(tuple(lead_trans))
     lead_top = kwant.Builder(sym_top)
-    lead_top[lat.shape(lead_shape, (0, 0))] = ta.array(onsite)
+    start_top = find_valid_start(lat, lead_shape, (0, 0))
+    lead_top[lat.shape(lead_shape, start_top)] = ta.array(onsite)
     for dx, dy, mat in hoppings:
         lead_top[kwant.builder.HoppingKind((dx, dy), lat, lat)] = ta.array(mat)
 
     # Bottom lead: opposite translation
-    neg_trans = tuple((-np.array(lead_trans)).tolist())
-    sym_bot = kwant.TranslationalSymmetry(neg_trans)
-    lead_bot = kwant.Builder(sym_bot)
-    lead_bot[lat.shape(lead_shape, (0, 0))] = ta.array(onsite)
-    for dx, dy, mat in hoppings:
-        lead_bot[kwant.builder.HoppingKind((dx, dy), lat, lat)] = ta.array(mat)
+    # neg_trans = tuple((-np.array(lead_trans)).tolist())
+    # sym_bot = kwant.TranslationalSymmetry(neg_trans)
+    # lead_bot = kwant.Builder(sym_bot)
+    # lead_bot[lat.shape(lead_shape, (0, 0))] = ta.array(onsite)
+    # for dx, dy, mat in hoppings:
+    #     lead_bot[kwant.builder.HoppingKind((dx, dy), lat, lat)] = ta.array(mat)
 
     syst.attach_lead(lead_top)
-    syst.attach_lead(lead_bot)
+    syst.attach_lead(lead_top.reversed())
 
     if verbose:
         print("  > Bulk-matching leads attached.")
 
 
 def build_system(domains: list[DomainDef], trial_wann: np.ndarray = None, cutoff_Ang: float = 400.0,
-                  verbose: bool =True, sample_thetas: list[float] = None) -> kwant.Builder:
+                  verbose: bool =True, sample_thetas: list[float] = None, tbg_leads: bool = False) -> kwant.Builder:
     """
     Generic builder for N-domain systems.
     """
@@ -227,7 +228,7 @@ def build_system(domains: list[DomainDef], trial_wann: np.ndarray = None, cutoff
         sample_thetas = np.round(np.arange(tmin, tmax + 1e-8, 0.01), 6)
     if verbose:
         print(f"  > Creating ThetaInterpolator with samples {sample_thetas[0]:.2f}..{sample_thetas[-1]:.2f} ({len(sample_thetas)} points)")
-    manager.create_theta_interpolator(sample_thetas, cache_dir="cache")
+    manager.create_theta_interpolator(sample_thetas, cache_dir="cache/eigensystems")
     syst = kwant.Builder()
     norbs = 10  # Assuming 10 orbitals from the Wannier model
     # Store domain info for interface loop
@@ -250,8 +251,8 @@ def build_system(domains: list[DomainDef], trial_wann: np.ndarray = None, cutoff
         # Populate sites
         # We start flood fill from seed, or just use shape
         # For disconnected domains, straightforward shape usage is safer than flood fill
-        # valid_seed = find_valid_start(lat, dom.shape_func, dom.seed_point)  # Just to check if seed is valid
-        syst[lat.shape(dom.shape_func, dom.seed_point)] = ta.array(model.HR_fine[tuple(model.center_idx)])
+        valid_seed = find_valid_start(lat, dom.shape_func, dom.seed_point)  # Just to check if seed is valid
+        syst[lat.shape(dom.shape_func, valid_seed)] = ta.array(model.HR_fine[tuple(model.center_idx)])
         
         # Add Bulk Hoppings (Internal)
         for dx, dy, mat in model.get_lattice_hopping():
@@ -267,21 +268,6 @@ def build_system(domains: list[DomainDef], trial_wann: np.ndarray = None, cutoff
             'lattice': lat,
             'theta': dom.theta
         }
-
-    # If only one domain, attach leads that reuse the domain's onsite and hoppings
-    if len(domains) == 1:
-        if verbose:
-            print("\nSingle-domain detected — attaching leads matching domain Hamiltonian...")
-        dom0 = domains[0]
-        model0 = manager.get_model(dom0.theta, upscale=1)
-        lat0 = domain_data[0]['lattice']
-        onsite0 = ta.array(model0.HR_fine[tuple(model0.center_idx)])
-        hopp0 = list(model0.get_lattice_hopping())
-        positions0 = np.array([s.pos for s in domain_data[0]['sites']])
-        lead_trans = tuple(model0.a2 + model0.a1)
-        extend = model0.scale_factor * 2
-        attach_bulk_leads_matching_domain(syst, lat0, onsite0, hopp0, positions0,
-                                         lead_trans=lead_trans, extend=extend, verbose=verbose)
 
     # --- 2. Compute Interfaces (Vectorized) ---
     if verbose:
@@ -350,6 +336,19 @@ def build_system(domains: list[DomainDef], trial_wann: np.ndarray = None, cutoff
                     
             if verbose:
                 print(f"  > Interface {domains[i].name} <-> {domains[j].name}: {added_hops} hoppings")
-
+    # If only one domain, attach leads that reuse the domain's onsite and hoppings
+    if len(domains) == 1 and tbg_leads == True:
+        if verbose:
+            print("\nSingle-domain detected — attaching leads matching domain Hamiltonian...")
+        dom0 = domains[0]
+        model0 = manager.get_model(dom0.theta, upscale=1)
+        lat0 = domain_data[0]['lattice']
+        onsite0 = ta.array(model0.HR_fine[tuple(model0.center_idx)])
+        hopp0 = list(model0.get_lattice_hopping())
+        positions0 = np.array([s.pos for s in domain_data[0]['sites']])
+        lead_trans = tuple(model0.a2 + model0.a1)
+        extend = model0.scale_factor * 2
+        attach_bulk_leads_matching_domain(syst, lat0, onsite0, hopp0, positions0,
+                                         lead_trans=lead_trans, extend=extend, verbose=verbose)
 
     return syst

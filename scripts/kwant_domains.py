@@ -20,8 +20,8 @@ import matplotlib.pyplot as plt
 
 # --- Imports from user-provided files ---
 from tbg_wannier import (
-    BMParameters, SolverParameters, MoireLattice, BMModel,
-    get_eigensystem_cached, read_u_mat, load_eigensystem
+    BMParameters, SolverParameters, MoireLattice, BMModel, WannierizationRecipe,
+    get_eigensystem_cached, read_u_mat, load_eigensystem, make_wanniers_from_U
 )
 from tbg_wannier.plotting import plot_band_structure, plot_hr_tiles_simple_triangular
 from tbg_wannier.grids import symmetry_path
@@ -29,11 +29,12 @@ from tbg_wannier.solver import select_neutrality_bands
 from tbg_wannier.domains import DomainDef, ShapePartitioner
 from tbg_wannier.kwant import build_system, attach_square_leads
 from tbg_wannier.interpolation import ThetaInterpolator
+from tbg_wannier.symmetry import (symmetrize_u_matrix, group_23, group_TR, repC2zT)
 from tbg_wannier.hoppings import filter_hopping_by_energy, solve_wannier_bands, build_hopping_from_U
 # --- Helper Class for Scaled Lattice ---
 # --- Kwant System Construction ---
 
-def plot_conductance(syst, energies):
+def plot_conductance(syst, energies, filename="conductance.png"):
     # Compute conductance
     print("Computing conductance...")
     data = []
@@ -46,10 +47,26 @@ def plot_conductance(syst, energies):
     plt.plot(energies, data)
     plt.xlabel("Energy [meV]")
     plt.ylabel("conductance [e^2/h]")
-    plt.savefig("conductance.png", dpi=300)
+    plt.savefig(filename, dpi=300)
 
 def main():
-    model, eigvals, eigvecs, _ = load_eigensystem("cache/eigensystems/bm_eigs_th1p05_wr0p8_w1110_NL20_Nk6_nb10_bv0_k4ca93f82a1.npz")
+    theta = 1.05
+    lat = MoireLattice.build(N_L=20, N_k=6)
+    solver = SolverParameters(nbands=10)
+    bm = BMParameters(
+        name="bm",
+        theta_deg=theta,
+        w1_meV=110.0,
+        w_ratio=0.8,
+        two_valleys=False,
+    )
+    recipe = WannierizationRecipe(
+        l=0.1 * 4 * np.pi / 3,
+        alpha=2.0,
+        ebr_sequence=["Ea", "Ea", "A1a", "A2a", "Ec"],
+    )
+    model = BMModel(bm, lat, solver=solver)
+    model, eigvals, eigvecs, _, _ = get_eigensystem_cached(model, cache_dir="cache/eigensystems")
     ktheta = model.params.ktheta
     lat = model.lat
     lattice_size = 1/ktheta * np.linalg.norm(model.lat.a1)
@@ -60,26 +77,37 @@ def main():
     # U, _ = read_u_mat(u_path)
     # HR, R_cart = build_hopping_from_U(lat, eig10b, U)
     # trial_wann = vec10b @ U  # Use the computed trial Wannier functions
-
-    wann = np.load("wan90/bm_th1p05_wr0p8_w1110_NL20_Nk6/bm_10b_wanniers.npz")['wanniers']
-    # sample_thetas = [0.98, 1.05, 1.10]
+    U, _ = read_u_mat("wan90/bm_th1p05_wr0p8_w1110_NL20_Nk6/10b_2Ea_u.mat")
+    wann = make_wanniers_from_U(U, eigvecs)
+    # repC2zT_mat = repC2zT(lat).toarray()
+    # wann_sym = (wann + repC2zT_mat @ wann.conj())
+    # norm = np.linalg.norm(wann_sym, axis=1, keepdims=True)
+    # wann_sym = wann_sym / norm
+    # wann = np.load("wan90/bm_th1p05_wr0p8_w1110_NL20_Nk6/bm_10b_wanniers.npz")['wanniers']
+    # sample_thetas = [1.05]
     # # print(f"Creating ThetaInterpolator with sample thetas: {sample_thetas}")
-    # interpolator = ThetaInterpolator(wann, sample_thetas=sample_thetas, interp_kind='pchip')
-    # out = interpolator.get_interpolated(1.10, upscale=1, verbose=True, cutoff_Ang=300)
-    # plot_hr_tiles_simple_triangular(out.mask, out.R_cart, savepath="images/hr_tiles_interpolated.png", scale="linear")
+    # interpolator = ThetaInterpolator(wann_sym, sample_thetas=sample_thetas, interp_kind='pchip', 
+    #                                  model_template=model)
+    # out = interpolator.get_interpolated(1.05, upscale=1, verbose=True, cutoff_Ang=np.inf)
+    # plot_hr_tiles_simple_triangular(out.HR, out.R_cart, savepath="images/hr_tr_tiles_interpolated_linear.png", scale="linear")
+    # plot_hr_tiles_simple_triangular(out.HR, out.R_cart, savepath="images/hr_tr_tiles_interpolated_log.png", scale="log")
+    # return None
     # k_path, dists, ticks, labels = symmetry_path(lat, nseg=20)    
     # evals = solve_wannier_bands(k_path, out.HR, out.R_cart/out.scale_factor)
     # plot_band_structure(dists, evals, ticks, labels, savepath="images/bands.png")
-    width, height = 2000., 10000. # Angstrom dimensions for the system
+    width, height = 400., 600. # Angstrom dimensions for the system
     np.random.seed(42)
     thetas = [1.05]  # Example: random twist angle for disorder
     domains = ShapePartitioner.voronoi_rectangle(width, height, thetas)
-
-    syst = build_system(domains, trial_wann=wann, cutoff_Ang=np.inf, sample_thetas=[1.05])
-    # attach_square_leads(syst, 0.5 * width, height, lead_a=lattice_size/10, lead_t=100.0, coupling_t=100.0, cutoff=lattice_size)
+    syst = build_system(domains, trial_wann=wann, cutoff_Ang=np.inf, sample_thetas=[1.05],
+                         tbg_leads=True, verbose=True)
+    # attach_square_leads(syst, width, height, lead_a=lattice_size, lead_t=100.0, coupling_t=100.0, cutoff=lattice_size)
     kwant.plot(syst)
     # print("System built. Finalizing...")
-
+    syst = syst.finalized()
+    energies = np.linspace(-25, 25, 10)
+    # plot_conductance(syst, energies=energies, filename="images/conductance_2ea.png")
+    kwant.plotter.bands(syst.leads[0])
     plot_dos = False
     if plot_dos:
         fsyst = syst.finalized()

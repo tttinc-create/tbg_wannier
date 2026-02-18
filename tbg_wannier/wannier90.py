@@ -96,7 +96,7 @@ def generate_win_content(
     units: str = "Ang",
     write_hr: bool = False,
     write_u_matrices: bool = True,
-    num_iter: int = 5000,
+    num_iter: int = 3000,
     conv_tol: float = 1.0e-10,
     disentangle: bool = True,
     dis_win_max: float = 80.0,
@@ -889,6 +889,7 @@ def write_w90_files(
     recipe: WannierizationRecipe,
     *,
     seedname: str | Path | None = None,
+    cache_dir: str | Path = "cache/eigensystems",
     wan90_root: str | Path = "wan90",
     eigvals: np.ndarray | None = None,
     do_write_eig: bool = True,
@@ -965,7 +966,7 @@ def write_w90_files(
 
     # 2) Load or compute eigensystem
     if read_from_cache:
-        _, eigvals, eigvecs, cache_path, _ = get_eigensystem_cached(model, cache_dir="cache")
+        _, eigvals, eigvecs, cache_path, _ = get_eigensystem_cached(model, cache_dir=cache_dir)
         print(f"Loaded eigensystem from cache: {cache_path}")
     elif eigvecs is None:
         raise ValueError("If not read from cache, eigenvectors must be provided.")
@@ -1150,6 +1151,7 @@ def run_workflow_for_angle(
             model,
             recipe_zhida,
             seedname=f"{seed}_zhida",
+            cache_dir=cache_dir,
             wan90_root=wan90_root,
             read_from_cache=True,
             do_write_eig=True,
@@ -1176,7 +1178,7 @@ def run_workflow_for_angle(
     # Apply symmetries to heavy fermions
     try:
         U_sym = symmetrize_u_matrix(U, group=group_23, lat=lat, eigvecs=eigvecs, recipe=recipe_zhida)
-        U_sym = symmetrize_with_P(U_sym, eigvecs=eigvecs, lat=lat)
+        # U_sym = symmetrize_with_P(U_sym, eigvecs=eigvecs, lat=lat)
         U_sym = symmetrize_u_matrix(U_sym, group=group_TR, lat=lat, eigvecs=eigvecs, recipe=recipe_zhida)
         if verbose:
             print(f"✓ Applied symmetry constraints")
@@ -1209,6 +1211,7 @@ def run_workflow_for_angle(
             recipe_8b,
             seedname=f"{seed}_8b",
             wan90_root=wan90_root,
+            cache_dir=cache_dir,
             read_from_cache=False,  # Load eigensystem from cache
             eigvecs=psi_orthocomp,
             do_write_eig=False,

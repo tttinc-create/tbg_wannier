@@ -409,12 +409,12 @@ def get_eigensystem_cached(
 
     if (not force_recompute) and path.exists():
         if verbose:
-            print("Cache file found, loading")
+            print(f"Cache file found at {path}, loading")
         model, ev, eV, meta = load_eigensystem(path, ref_basis=ref_basis, output_overlaps=output_overlaps)
         return model, ev, eV, path, meta
 
     # compute
-    print("Cache file not found, computing")
+    print(f"Cache file not found at {path}, computing")
     eigvals, eigvecs = solve_kpoints(model)
     print("Done with computing")
     # metadata (store params snapshot + basic shapes)
