@@ -353,6 +353,7 @@ class GroupElement:
     # decomposition: elem = gen * parent (left-multiplication by generator)
     parent: Optional[str] = None
     gen_left: Optional[str] = None
+    is_antiunitary: bool = False
 
 
 class SymmetryGroup:
@@ -374,8 +375,12 @@ class SymmetryGroup:
     def compose_ops(name: str, a: "SymmetryOperator", b: "SymmetryOperator") -> "SymmetryOperator":
         """Return SymmetryOperator for the product a*b (apply b then a)."""
         R = a.R @ b.R
-        D_int = a.D_int @ b.D_int
-        D_layer = a.D_layer @ b.D_layer
+        if a.is_antiunitary:
+            D_int = a.D_int @ b.D_int.conj()
+            D_layer = a.D_layer @ b.D_layer.conj()
+        else:   
+            D_int = a.D_int @ b.D_int
+            D_layer = a.D_layer @ b.D_layer
         is_antiunitary = a.is_antiunitary ^ b.is_antiunitary
         return SymmetryOperator(name=name, R=R, D_int=D_int, D_layer=D_layer, is_antiunitary=is_antiunitary, tol=min(a.tol, b.tol))
 
@@ -399,7 +404,7 @@ class SymmetryGroup:
             tol=any_gen.tol,
         )
 
-        elements: Dict[str, GroupElement] = {identity_name: GroupElement(identity_name, E, parent=None, gen_left=None)}
+        elements: Dict[str, GroupElement] = {identity_name: GroupElement(identity_name, E, parent=None, gen_left=None, is_antiunitary=False)}
         key_to_name: Dict[Tuple[int, ...], str] = {_op_key(E): identity_name}
 
         # BFS frontier of element names
@@ -418,7 +423,7 @@ class SymmetryGroup:
                 # register new element
                 new_name = f"{gname}*{cur_name}"
                 key_to_name[k] = new_name
-                elements[new_name] = GroupElement(new_name, new_op, parent=cur_name, gen_left=gname)
+                elements[new_name] = GroupElement(new_name, new_op, parent=cur_name, gen_left=gname, is_antiunitary=new_op.is_antiunitary)
                 queue.append(new_name)
 
                 if len(elements) > max_elements:
@@ -469,13 +474,15 @@ def build_D_band_from_group(
     *,
     generator_names: Optional[List[str]] = None,
     norb_internal: Optional[int] = None,
+    irr_kpts_indices: Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, List[str]]:
     """Build D_band (sewing matrices) for ALL group elements by composing generator sewings.
 
     Returns
     -------
-    D_band_all : (Ne, Nk, nb, nb)
+    D_band_all : (Ne, Nk, nb, nb) or (Ne, Nirr, nb, nb)
         Ne = number of group elements in `group.element_names()` order.
+        If irr_kpts_indices is provided, axis 1 will be Nirr=len(irr_kpts_indices).
     elem_names : list[str]
         Names in the same order as axis 0 of D_band_all.
 
@@ -531,6 +538,12 @@ def build_D_band_from_group(
         reps[name] = _compose_rep_on_mesh(reps[gen], reps[parent], k_maps[parent])
 
     D_band_all = np.stack([reps[name] for name in elem_names], axis=0)
+
+    if irr_kpts_indices is not None:
+        # Slice to keep only irreducible k-points
+        # irr_kpts_indices should be 0-based indices into the full (Nk) mesh
+        D_band_all = D_band_all[:, irr_kpts_indices, :, :]
+
     return D_band_all, elem_names
 
 
@@ -545,6 +558,7 @@ def build_D_wann_from_group(
     *,
     generator_names: Optional[List[str]] = None,
     identity_name: Optional[str] = None,
+    irr_kpts_indices: Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, List[str]]:
     """Build D_wann(k) for ALL group elements by composing generator target reps.
 
@@ -553,6 +567,9 @@ def build_D_wann_from_group(
     D_wann_generators : dict gen_name -> array (Nk, nw, nw)
         The target Wannier-basis representation for each *generator* on your mesh.
         These can come from your EBR construction (block-diagonal over chosen EBRs).
+    irr_kpts_indices : array_like, optional
+        If provided, the output array will be sliced to include only these k-points.
+        (0-based indices).
     """
     elem_names = group.element_names
     k_frac = lat.k_frac
@@ -593,6 +610,11 @@ def build_D_wann_from_group(
         reps[name] = _compose_rep_on_mesh(reps[gen], reps[parent], k_maps[parent])
 
     D_wann_all = np.stack([reps[name] for name in elem_names], axis=0)
+    
+    if irr_kpts_indices is not None:
+        # Slice to keep only irreducible k-points
+        D_wann_all = D_wann_all[:, irr_kpts_indices, :, :]
+
     return D_wann_all, elem_names
 
 
@@ -728,6 +750,102 @@ def build_dmn_maps_trivial_irr(
         sym_kpt_map[:, isym] = k_map.astype(int) + 1          # 1-based for Wannier90
 
     return full_to_irr, irr_kpts, sym_kpt_map, elem_names
+
+
+def build_dmn_maps_irreducible(
+    group: SymmetryGroup,
+    lat: MoireLattice,
+    *,
+    elem_names: list[str] | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str]]:
+    """Build mapping arrays needed for Wannier90 `seedname.dmn` using the
+    true irreducible wedge of the k-mesh under the group action.
+    
+    Returns
+    -------
+    full_to_irr : (Nk,) int
+        1-based mapping from full k index -> irr index.
+        The value irr = full_to_irr[ik] implies that `canonical_k = irr_kpts[irr-1]`.
+        Note: Wannier90 expects full_to_irr[ik] to be the 1-based index 
+        within the *irreducible list*, not the full list index of the representative.
+        
+    irr_kpts : (Nirr,) int
+        1-based list of indices of the irreducible k-points in the full mesh.
+        
+    sym_kpt_map : (Nk, Ne) int
+        1-based indices for S*k.
+        sym_kpt_map[ik, isym] gives the index of K' = Op[isym] * k[ik] in the FULL list.
+        
+    elem_names : list[str]
+        Group element names corresponding to the symmetry index.
+    """
+    if elem_names is None:
+        elem_names = group.element_names
+
+    k_frac = lat.k_frac
+    Nk = k_frac.shape[0]
+    Nmesh = (lat.N_k, lat.N_k)
+    nsym = len(elem_names)
+
+    # Precompute maps for all symmetries: map[isym][ik] -> ik_prime (0-based)
+    # all_k_maps[isym, ik] = image of k[ik] under sym[isym]
+    all_k_maps = np.zeros((nsym, Nk), dtype=int)
+    for isym, name in enumerate(elem_names):
+        all_k_maps[isym] = group.k_map_for_element(name, k_frac, Nmesh)
+
+    # 1. Identify orbits and pick representatives
+    # visited[ik] = True if ik has been assigned to an orbit
+    visited = np.zeros(Nk, dtype=bool)
+    
+    # irr_indices_full: 0-based indices in the full mesh of the chosen representatives
+    irr_indices_full = []
+    
+    # mapping from full index -> unique orbit ID (0-based index into irr_indices_full)
+    orbit_id = np.empty(Nk, dtype=int)
+    orbit_id.fill(-1)
+
+    for ik in range(Nk):
+        if visited[ik]:
+            continue
+            
+        # Found a new orbit representative
+        curr_orbit_idx = len(irr_indices_full)
+        irr_indices_full.append(ik)
+        
+        # Generate the star of k[ik]
+        # star_indices = set(all_k_maps[:, ik])
+        # To be robust, we need closure. But all_k_maps contains the full group,
+        # so {Op * k} for all Op is the full orbit.
+        star_indices = np.unique(all_k_maps[:, ik])
+        
+        for k_star in star_indices:
+            if not visited[k_star]:
+                visited[k_star] = True
+                orbit_id[k_star] = curr_orbit_idx
+            # check consistency? If already visited and assigned to *another* orbit,
+            # then groups didn't close or something is wrong.
+            elif orbit_id[k_star] != curr_orbit_idx:
+                # This could happen if star_indices overlaps an existing orbit
+                # implying the previous orbit wasn't complete?
+                # With a full group, this shouldn't happen.
+                pass
+
+    # 2. Build outputs
+    
+    # full_to_irr: 1-based index in the *irreducible list*
+    # orbit_id is 0-based index in irr_indices_full, so just add 1
+    full_to_irr = orbit_id + 1
+    
+    # irr_kpts: 1-based indices in the *full list*
+    irr_kpts = np.array(irr_indices_full, dtype=int) + 1
+    
+    # sym_kpt_map: map from (ik_irr, isym) -> ik_prime (1-based full index)
+    # Transpose all_k_maps to (Nk, nsym), add 1, then slice to keep only irr k-points
+    sym_kpt_map_full = all_k_maps.T.astype(int) + 1
+    sym_kpt_map = sym_kpt_map_full[irr_indices_full, :]
+
+    return full_to_irr, irr_kpts, sym_kpt_map, elem_names
+
 
 
 
@@ -903,7 +1021,14 @@ group_23 = SymmetryGroup.from_generators({
 }, max_elements=16)
 
 group_TR = SymmetryGroup.from_generators({"C2zT": SymmetryOperator("C2zT", R=I2, D_int=sx, D_layer=I2, is_antiunitary=True)}, max_elements=16)
-
+group_662 = SymmetryGroup.from_generators({
+    "C3z": SymmetryOperator("C3z", R=np.array([[-.5,-np.sqrt(3)/2],[np.sqrt(3)/2,-.5]], dtype=float),
+                            D_int=np.diag(np.exp(1j*2*np.pi/3*np.array([1, -1]))).astype(complex), 
+                            D_layer=I2),
+    "C2x": SymmetryOperator("C2x", R=np.array([[1,0],[0,-1]], dtype=float)
+                            , D_int=sx, D_layer=sx),
+    "C2zT": SymmetryOperator("C2zT", R=I2, D_int=sx, D_layer=I2, is_antiunitary=True)
+}, max_elements=32)
 
 
 
@@ -1022,8 +1147,6 @@ def symmetrize_u_matrix(
                 D_b = D_band[ig]            # (Nk, nb, nb)
                 U_g = U_cur[kmap[:, ig]]   # (Nk, nb, nw)
                 D_w = D_wann[ig]           # (Nk, nw, nw)
-
-                # tmp = D_b.conj().transpose(0,2,1) @ U_g @ D_w
                 tmp = np.matmul(np.matmul(D_b.conj().transpose(0, 2, 1), U_g), D_w)
                 acc += tmp
             else:
