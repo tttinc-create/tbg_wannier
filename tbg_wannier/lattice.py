@@ -116,17 +116,30 @@ class MoireLattice:
         """
         Convert k from cartesian to fractional coordinates (k = k1 b1 + k2 b2).
         """
-        k1_frac = np.dot(k_cart, self.a1)/(2*np.pi)
-        k2_frac = np.dot(k_cart, self.a2)/(2*np.pi)
-        return np.array([k1_frac, k2_frac])
+        k_cart = np.asarray(k_cart)
+        # support both single 2-vector and stacks (...,2)
+        k1_frac = np.tensordot(k_cart, self.a1, axes=([-1], [0])) / (2 * np.pi)
+        k2_frac = np.tensordot(k_cart, self.a2, axes=([-1], [0])) / (2 * np.pi)
+        return np.stack([k1_frac, k2_frac], axis=-1)
 
     def cart_coords(self, k_frac: np.ndarray) -> np.ndarray:
         """Convert fractional coordinates to cartesian."""
-        return k_frac[0] * self.b1 + k_frac[1] * self.b2
+        k_frac = np.asarray(k_frac)
+        # support both single 2-vector and stacks (...,2)
+        return k_frac[..., 0:1] * self.b1 + k_frac[..., 1:2] * self.b2
     
     def cart_real_coords(self, r_frac: np.ndarray) -> np.ndarray:
         """Convert real-space fractional coordinates to cartesian."""
-        return r_frac[0] * self.a1 + r_frac[1] * self.a2
+        r_frac = np.asarray(r_frac)
+        # support both single 2-vector and stacks (...,2)
+        return r_frac[..., 0:1] * self.a1 + r_frac[..., 1:2] * self.a2
+    def frac_real_coords(self, r_cart: np.ndarray) -> np.ndarray:
+        """Convert real-space cartesian coordinates to fractional."""
+        r_cart = np.asarray(r_cart)
+        # support both single 2-vector and stacks (...,2)
+        r1_frac = np.tensordot(r_cart, self.b1, axes=([-1], [0])) / (2 * np.pi)
+        r2_frac = np.tensordot(r_cart, self.b2, axes=([-1], [0])) / (2 * np.pi)
+        return np.stack([r1_frac, r2_frac], axis=-1)
 
     def wrap_mn(self, m: int, n: int) -> Tuple[int, int]:
         """

@@ -102,3 +102,11 @@ def generate_k_frac(Nk: int, gamma_centered: bool = False) -> Tuple[np.ndarray, 
         k_frac = np.stack([k1.ravel(), k2.ravel()], axis=1)
 
     return k_frac
+
+def make_wanniers_from_U(U: np.ndarray, eigvecs: np.ndarray) -> np.ndarray:
+    wan = eigvecs @ U
+    return wan
+
+def make_U_from_wanniers(wan: np.ndarray, eigvecs: np.ndarray) -> np.ndarray:
+    U = eigvecs.conj().swapaxes(1, 2) @ wan
+    return U

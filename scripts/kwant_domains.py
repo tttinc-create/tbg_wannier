@@ -23,13 +23,13 @@ from tbg_wannier import (
     BMParameters, SolverParameters, MoireLattice, BMModel, WannierizationRecipe,
     get_eigensystem_cached, read_u_mat, load_eigensystem, make_wanniers_from_U
 )
-from tbg_wannier.plotting import plot_band_structure, plot_hr_tiles_simple_triangular
+from tbg_wannier.plotting import plot_band_structure, plot_hr_tiles_simple_triangular, plot_real_space_wanniers
 from tbg_wannier.grids import symmetry_path
 from tbg_wannier.solver import select_neutrality_bands
 from tbg_wannier.domains import DomainDef, ShapePartitioner
 from tbg_wannier.kwant import build_system, attach_square_leads
 from tbg_wannier.interpolation import ThetaInterpolator
-from tbg_wannier.symmetry import (symmetrize_u_matrix, group_23, group_TR, repC2zT)
+from tbg_wannier.symmetry import (symmetrize_u_matrix, group_23, group_TR, group_662)
 from tbg_wannier.hoppings import filter_hopping_by_energy, solve_wannier_bands, build_hopping_from_U
 # --- Helper Class for Scaled Lattice ---
 # --- Kwant System Construction ---
@@ -49,9 +49,74 @@ def plot_conductance(syst, energies, filename="conductance.png"):
     plt.ylabel("conductance [e^2/h]")
     plt.savefig(filename, dpi=300)
 
+def main1():
+    model, eigvals, eigvecs, _ = load_eigensystem("cache/eigensystems/bm_eigs_th1p05_wr0p8_w1110_NL20_Nk6_nb10_bv0_k4ca93f82a1.npz")
+    # model, eigvals, eigvecs, _ = load_eigensystem("cache/eigensystems/bm_eigs_th1p05_wr0p8_w1110_NL20_Nk18_nb10_bv0_k4fe3c41d1a.npz")
+
+    ktheta = model.params.ktheta
+    lat = model.lat
+    lattice_size = 1/ktheta * np.linalg.norm(model.lat.a1)
+    print(f"real space unit cell size {lattice_size:.2f} Angstrom")
+    # # Select 10 neutrality bands
+    # eig10b, vec10b = select_neutrality_bands(eigvals, eigvecs, n=10)
+    # u_path = "wan90/bm_th1p05_wr0p8_w1110_NL20_Nk6/bm_10b_u.mat"
+    # U, _ = read_u_mat(u_path)
+    # HR, R_cart = build_hopping_from_U(lat, eig10b, U)
+    # trial_wann = vec10b @ U  # Use the computed trial Wannier functions
+    recipes = {'2EaA1aA2aEc': WannierizationRecipe(
+        l=0.1 * 4 * np.pi / 3,
+        alpha=2.0,
+        ebr_sequence=["Ea", "Ea", "A1a", "A2a", "Ec"],
+                ),
+                'EaA1aBfEc': WannierizationRecipe(
+                    l=0.1 * 4 * np.pi / 3,
+                    alpha=2.0,
+                    ebr_sequence=["Ea", "A1a", "Bf", "Ec"],
+                ),
+                'EaA2aAfEc': WannierizationRecipe(
+                    l=0.1 * 4 * np.pi / 3,
+                    alpha=2.0,
+                    ebr_sequence=["Ea", "A2a", "Af", "Ec"],
+                ),
+                'AfBfEc': WannierizationRecipe(
+                    l=0.1 * 4 * np.pi / 3,
+                    alpha=2.0,
+                    ebr_sequence=["Af", "Bf", "Ec"],
+                ),
+                }
+    brs = ['2EaA1aA2aEc', 'EaA1aBfEc', 'EaA2aAfEc', 'AfBfEc']
+    for br in brs[2:3]:
+        U, _ = read_u_mat(f"/home/fengw/tbg_wannier/wan90/bm_th1p05_wr0p8_w1110_NL20_Nk6/bm_{br}_10b_u.mat")
+        # U, _ = read_u_mat(f"/home/fengw/tbg_wannier/wan90/bm_th1p05_wr0p8_w1110_NL20_Nk18/bm_{br}_u.mat")
+        recipe = recipes[br]
+        U_sym = symmetrize_u_matrix(U, group=group_662, recipe=recipe, eigvecs=eigvecs, lat=lat, n_iter=3)
+        # U = symmetrize_with_C2zT(U, eigvecs, lat, recipe)
+        wann = make_wanniers_from_U(U, eigvecs)
+        wann_sym = make_wanniers_from_U(U_sym, eigvecs)
+        plot_real_space_wanniers(
+            lat, wann, beta_idx=1, layer=1,
+            savepath='wann_test', ncols=5, cmap="inferno"
+        )
+        plot_real_space_wanniers(
+            lat, wann_sym, beta_idx=1, layer=1,
+            savepath='wann_sym_test', ncols=5, cmap="inferno"
+        )
+        thetas = [1.05]  # Example: random twist angle for disorder
+    # print(f"Creating ThetaInterpolator with sample thetas: {sample_thetas}")
+        plot_hr = False
+        if plot_hr:
+            for i, w in enumerate([wann, wann_sym]):
+                out = ThetaInterpolator(w, sample_thetas=thetas, model_template=model, interp_kind='pchip').get_interpolated(1.05, 
+                                                                    upscale=1, verbose=True, cutoff_Ang=np.inf)
+                plot_hr_tiles_simple_triangular(out.HR, out.R_cart, savepath=f"images/18x18/hr10b_{br}_linear_{i}.png", scale="linear",
+                                                 title=f"H(R) for band rep {br}")
+                plot_hr_tiles_simple_triangular(out.HR, out.R_cart, savepath=f"images/18x18/hr10b_{br}_log_{i}.png", scale="log",
+                                             title=f"H(R) for band rep {br}")
+    return None
+
 def main():
     theta = 1.05
-    lat = MoireLattice.build(N_L=20, N_k=6)
+    lat = MoireLattice.build(N_L=20, N_k=18)
     solver = SolverParameters(nbands=10)
     bm = BMParameters(
         name="bm",
@@ -77,8 +142,9 @@ def main():
     # U, _ = read_u_mat(u_path)
     # HR, R_cart = build_hopping_from_U(lat, eig10b, U)
     # trial_wann = vec10b @ U  # Use the computed trial Wannier functions
-    U, _ = read_u_mat("wan90/bm_th1p05_wr0p8_w1110_NL20_Nk6/10b_2Ea_u.mat")
-    wann = make_wanniers_from_U(U, eigvecs)
+    # U, _ = read_u_mat("wan90/bm_th1p05_wr0p8_w1110_NL20_Nk6/10b_2Ea_u.mat")
+    # wann = make_wanniers_from_U(U, eigvecs)
+    wann = np.load("/home/fengw/tbg_wannier/wan90/bm_th1p05_wr0p8_w1110_NL20_Nk6/bm_2EaA1aA2aEc_10b_wanniers.npz")['wanniers']
     # repC2zT_mat = repC2zT(lat).toarray()
     # wann_sym = (wann + repC2zT_mat @ wann.conj())
     # norm = np.linalg.norm(wann_sym, axis=1, keepdims=True)

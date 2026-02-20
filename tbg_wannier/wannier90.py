@@ -23,12 +23,11 @@ from .bm import BMModel
 from .config import WannierizationRecipe
 from .solver import get_eigensystem_cached, module_name_from_model, select_neutrality_bands
 from .trials import TrialBuilder
-from .symmetry import SymmetryGroup,build_D_band_from_group, build_D_wann_from_group, build_D_wann_generators_from_EBRs, \
-    build_dmn_maps_irreducible, group_23, group_TR, symmetrize_u_matrix, symmetrize_with_P
+from .symmetry import SymmetryGroup, group_23, group_TR, symmetrize_u_matrix, symmetrize_with_C2zT
 import numpy as np
 import re
-from tbg_wannier.plotting import plot_real_space_wanniers
-
+from .plotting import plot_real_space_wanniers
+from .utils import make_U_from_wanniers, make_wanniers_from_U
 
 def ensure_wan90_workdir(
     module_name: str,
@@ -888,13 +887,6 @@ def write_dmn(
                     bool_strs.append('F')
             f.write(" ".join(bool_strs) + "\n")
 
-def make_wanniers_from_U(U: np.ndarray, eigvecs: np.ndarray) -> np.ndarray:
-    wan = eigvecs @ U
-    return wan
-
-def make_U_from_wanniers(wan: np.ndarray, eigvecs: np.ndarray) -> np.ndarray:
-    U = eigvecs.conj().swapaxes(1, 2) @ wan
-    return U
 
 def write_w90_files(
     model: BMModel,
@@ -911,6 +903,7 @@ def write_w90_files(
     sym_adapted: bool = False,
     disentangle: bool = False,
     no_trials: bool = False,
+    do_localize: bool = True,
     force_localization: bool = False,
     wannier90_x_path: Optional[str | Path] = None,
 ) -> Path:
@@ -1060,19 +1053,12 @@ def write_w90_files(
     if sym_adapted:
         print("Building symmetry-adapted Wannierization...")
         # DMN maps (trivial irreducible k structure)
-        full_to_irr, irr_kpts, sym_kpt_map, _ = build_dmn_maps_irreducible(
-            group, lat)
+        full_to_irr, irr_kpts, sym_kpt_map, elem_names = group.build_dmn_maps_irreducible(
+            lat)
         irr_kpts_indices = irr_kpts - 1  # Wannier90 expects 1-based indices
         # D_band for full group
-        D_band, elem_names = build_D_band_from_group(group, lat, eigvecs, irr_kpts_indices=irr_kpts_indices)
-        
-        # D_wann for full group from EBR targets
-        D_wann_gens = build_D_wann_generators_from_EBRs(
-            ebr_sequence=list(recipe.ebr_sequence),
-            lat=lat,
-            generators_needed=["C3z", "C2x", "C2zT"]
-        )
-        D_wann, elem_names2 = build_D_wann_from_group(group, lat, D_wann_gens, irr_kpts_indices=irr_kpts_indices)
+        D_band, _ = group.build_D_band_from_group(lat, eigvecs, irr_kpts_indices=irr_kpts_indices)
+        D_wann, _ = group.build_D_wann_from_group(lat, ebr_sequence=recipe.ebr_sequence, irr_kpts_indices=irr_kpts_indices)
         
 
         anti_unitary_ops = np.array([op.is_antiunitary for op in group.elements.values()])
@@ -1090,7 +1076,9 @@ def write_w90_files(
             anti_unitary_ops=anti_unitary_ops,
         )
         print(f"Wrote symmetry matrices: {seed}.dmn")
-    
+    if not do_localize:
+        print("Skipping localization as do_localize=False.")
+        return work_dir
     # 9) Auto-run Wannier90 full optimization if U-matrix not found
     u_mat_path = work_dir / f"{seedname}_u.mat"
     if not u_mat_path.exists() or force_localization:
@@ -1190,9 +1178,7 @@ def run_workflow_for_angle(
     
     # Apply symmetries to heavy fermions
     try:
-        U_sym = symmetrize_u_matrix(U, group=group_23, lat=lat, eigvecs=eigvecs, recipe=recipe_zhida)
-        # U_sym = symmetrize_with_P(U_sym, eigvecs=eigvecs, lat=lat)
-        U_sym = symmetrize_u_matrix(U_sym, group=group_TR, lat=lat, eigvecs=eigvecs, recipe=recipe_zhida)
+        U_sym = symmetrize_u_matrix(U, group=group_23, lat=lat, eigvecs=eigvecs, recipe=recipe_zhida, do_C2zT=True)
         if verbose:
             print(f"✓ Applied symmetry constraints")
     except Exception as e:
@@ -1240,7 +1226,7 @@ def run_workflow_for_angle(
     try:
         u_mat_path_8b = work_dir_8b / f"{seed}_8b_u.mat"
         U_w90_8b, k3 = read_u_mat(u_mat_path_8b)
-        U_8b_sym = symmetrize_u_matrix(U_w90_8b, group=group_TR, lat=lat, eigvecs=psi_orthocomp, recipe=recipe_8b, enforce_semiunitary=True)
+        U_8b_sym = symmetrize_with_C2zT(U_w90_8b, psi_orthocomp, lat, recipe_8b)
 
         w_8b = make_wanniers_from_U(U_8b_sym, psi_orthocomp)
         wanniers = np.concatenate((w_zhida, w_8b), axis=-1)
